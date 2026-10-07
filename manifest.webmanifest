@@ -1,0 +1,22 @@
+{
+  "name": "Finanzas personales",
+  "short_name": "Finanzas",
+  "description": "Ingresos, gastos, ahorro, inversiones, deudas y patrimonio. Tus datos quedan solo en tu teléfono.",
+  "lang": "es-CO",
+  "id": "./",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#14202b",
+  "theme_color": "#14202b",
+  "categories": ["finance", "productivity"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "Registrar gasto", "short_name": "Gasto", "url": "./index.html#/inicio?add=expense", "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }] }
+  ]
+}
