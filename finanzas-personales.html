@@ -9,8 +9,8 @@
   <meta name="apple-mobile-web-app-title" content="Finanzas">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
-  <!-- Privacidad: connect-src 'none' impide cualquier petición de red (fetch, XHR, WebSocket, beacons). -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' data: blob:; connect-src 'none'; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <!-- Privacidad: sin cuenta en la nube ni Drive, la app no hace ninguna petición de red. Si los activas, solo puede hablar con servicios de Google/Firebase. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' data: blob:; script-src 'self' 'unsafe-inline' https://accounts.google.com/gsi/client https://apis.google.com; style-src 'self' 'unsafe-inline' https://accounts.google.com/gsi/style; connect-src 'self' https://www.googleapis.com https://accounts.google.com https://firestore.googleapis.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com; frame-src https://accounts.google.com https://apis.google.com https://*.firebaseapp.com https://*.web.app; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; form-action 'none'">
   <meta name="referrer" content="no-referrer">
   <meta name="theme-color" content="#14202b">
   <meta name="description" content="Sistema financiero personal: ingresos, gastos, ahorro, inversiones, deudas y patrimonio. Funciona 100% en tu navegador.">
@@ -688,6 +688,31 @@ body { overscroll-behavior-y: none; }
 }
 @media (max-width: 959px) { body { padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right); } }
 
+.drive-help { margin-top: 12px; font-size: .86rem; }
+.drive-help summary { cursor: pointer; color: var(--accent); font-weight: 560; }
+.drive-help ol { padding-left: 20px; display: grid; gap: 6px; margin-top: 8px; }
+.drive-help code { word-break: break-all; }
+.drive-status { display: flex; align-items: center; gap: 6px; }
+
+/* ---------------- Inicio de sesión ---------------- */
+body.auth-mode .topbar, body.auth-mode .tabbar, body.auth-mode .sidebar, body.auth-mode #banners { display: none !important; }
+body.auth-mode #view { padding-bottom: env(safe-area-inset-bottom); }
+.auth { min-height: 100vh; min-height: 100dvh; display: grid; place-items: center; padding: max(24px, env(safe-area-inset-top)) 16px 24px; }
+.auth-card { width: min(100%, 400px); background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-xl); box-shadow: var(--shadow); padding: 28px 22px 22px; display: flex; flex-direction: column; gap: 12px; }
+.auth-card h1 { font-size: 1.5rem; margin: 0; letter-spacing: -.01em; }
+.auth-card > p { margin: 0; }
+.auth-brand svg { width: 52px; height: 52px; }
+.auth-card form { display: flex; flex-direction: column; gap: 10px; margin-top: 4px; }
+.auth-err { color: var(--expense); font-size: .88rem; min-height: 1.2em; margin: 0; }
+.auth-links { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 6px; }
+.auth-or { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: .8rem; }
+.auth-or::before, .auth-or::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.auth-local { text-align: center; margin: 0; }
+.btn.block { width: 100%; justify-content: center; }
+.cloud-card textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+
+[hidden] { display: none !important; }
+
 </style>
 </head>
 <body class="booting">
@@ -719,6 +744,23 @@ body { overscroll-behavior-y: none; }
   <noscript><p class="noscript">Esta aplicación necesita JavaScript activado. Todo se ejecuta localmente en tu navegador.</p></noscript>
 
   <!-- Núcleo (sin DOM) -->
+  <script>
+/* js/config.js */
+/* Configuración opcional (valores públicos, no secretos: la seguridad la dan las reglas de Firestore).
+ *
+ * firebase:      pega aquí tu firebaseConfig para que todos tus dispositivos muestren
+ *                directamente la pantalla de inicio de sesión (sin pegarlo en cada uno).
+ * driveClientId: ID de cliente de Google para la copia en Google Drive (opcional).
+ */
+(function (F) {
+  F.config = Object.assign({
+    firebase: null,
+    // firebase: { apiKey: '...', authDomain: 'tu-proyecto.firebaseapp.com', projectId: 'tu-proyecto', appId: '...' },
+    driveClientId: ''
+  }, F.config || {});
+})(window.FIN = window.FIN || {});
+
+</script>
   <script>
 /* js/core/utils.js */
 /* =========================================================================
@@ -1462,6 +1504,340 @@ body { overscroll-behavior-y: none; }
   F.storage.IndexedDBAdapter = IndexedDBAdapter;
   F.storage.MemoryAdapter = MemoryAdapter;
   F.storage.DB_NAME = DB_NAME;
+})(typeof window !== 'undefined' ? (window.FIN = window.FIN || {}) : (globalThis.FIN = globalThis.FIN || {}));
+
+</script>
+  <script>
+/* js/storage/cloud.js */
+/* =========================================================================
+ * storage/cloud.js — Cuenta en la nube con Firebase (plan gratuito Spark).
+ *
+ * FirestoreAdapter implementa la MISMA interfaz que IndexedDBAdapter, así que
+ * el resto de la app no cambia. Diseño pensado para el plan gratuito:
+ *
+ *   users/{uid}/data/{colección}   un documento por colección  { items: { id: registro } }
+ *   users/{uid}/tx/{AAAA-MM}       un documento por mes         { items: { id: movimiento } }
+ *
+ * Así, abrir la app lee ~10 documentos + 1 por mes con movimientos (no uno por
+ * movimiento), y cada cambio escribe solo el campo de ese registro, de modo que
+ * dos dispositivos editando registros distintos no se pisan.
+ *
+ * Firestore guarda una copia local (funciona sin conexión) y encola los cambios
+ * hasta que vuelve internet. Los cambios de otros dispositivos llegan en vivo.
+ * ========================================================================= */
+(function (F) {
+  'use strict';
+
+  const KEY = 'finanzas-cloud';
+  const CHUNK = 400;                 // operaciones por lote (límite de Firestore: 500)
+  const monthOf = (rec) => (rec && typeof rec.date === 'string' && /^\d{4}-\d{2}/.test(rec.date)) ? rec.date.slice(0, 7) : 'sin-fecha';
+  const clone = (o) => JSON.parse(JSON.stringify(o));
+
+  // ============================== Adaptador ==============================
+  /**
+   * opts: { fs (funciones del SDK), db, uid, account, onRemote(), onError(err), onStatus(status) }
+   */
+  function FirestoreAdapter(stores, opts) {
+    this.stores = stores;
+    this.kind = 'firestore';
+    this.fs = opts.fs; this.db = opts.db; this.uid = opts.uid; this.account = opts.account || '';
+    this.onRemote = opts.onRemote || function () {};
+    this.onError = opts.onError || function (e) { console.error(e); };
+    this.onStatus = opts.onStatus || function () {};
+    this.everSynced = !!opts.everSynced;            // ¿este dispositivo ya recibió datos del servidor alguna vez?
+    this.onSynced = opts.onSynced || function () {};
+    this.firstSyncTimeoutMs = opts.firstSyncTimeoutMs || 25000;
+    this.isOnline = opts.isOnline || (() => typeof navigator === 'undefined' || navigator.onLine !== false);
+    this.data = {};
+    for (const s of stores) this.data[s] = new Map();
+    this.txMonth = new Map();        // id de movimiento → mes donde está guardado
+    this.months = new Set();         // meses con documento en la nube
+    this.unsubs = [];
+    this.opened = null;
+    this.meta = { data: { pending: false, fromCache: true }, tx: { pending: false, fromCache: true } };
+    this._remoteTimer = null;
+  }
+  const P = FirestoreAdapter.prototype;
+
+  P._dataCol = function () { return this.fs.collection(this.db, 'users', this.uid, 'data'); };
+  P._txCol = function () { return this.fs.collection(this.db, 'users', this.uid, 'tx'); };
+  P._dataRef = function (store) { return this.fs.doc(this.db, 'users', this.uid, 'data', store); };
+  P._txRef = function (month) { return this.fs.doc(this.db, 'users', this.uid, 'tx', month); };
+
+  P.status = function () {
+    const pending = this.meta.data.pending || this.meta.tx.pending;
+    const offline = this.meta.data.fromCache || this.meta.tx.fromCache;
+    return pending ? (offline ? 'offline-pending' : 'pending') : (offline ? 'offline' : 'synced');
+  };
+
+  P.open = function () {
+    if (this.opened) return this.opened;
+    const self = this;
+    this.opened = new Promise((resolve, reject) => {
+      let gotData = false, gotTx = false, done = false;
+      const ready = () => {
+        if (!done && gotData && gotTx) {
+          done = true; clearTimeout(timer);
+          if (!self.everSynced) { self.everSynced = true; self.onSynced(); }
+          resolve(self);
+        }
+      };
+      let failed = false;
+      const fail = (err) => { if (failed) return; if (!done) { done = failed = true; clearTimeout(timer); self.close(); reject(err); } else self.onError(err); };
+      // Primera vez en este dispositivo: esperar datos del SERVIDOR (no una caché vacía), para no
+      // sobrescribir la cuenta con valores por defecto.
+      const timer = this.everSynced ? null : setTimeout(() => {
+        const e = new Error('Necesitas internet la primera vez que abres tu cuenta en este dispositivo.'); e.code = 'first-sync';
+        fail(e);
+      }, this.firstSyncTimeoutMs);
+      const handle = (kind, snap) => {
+        if (failed) return;
+        if (!self.everSynced && snap.metadata.fromCache) {
+          if (!self.isOnline()) { const e = new Error('Necesitas internet la primera vez que abres tu cuenta en este dispositivo.'); e.code = 'first-sync'; return fail(e); }
+          return;  // esperar la respuesta del servidor
+        }
+        if (kind === 'data') self._applyData(snap); else self._applyTx(snap);
+        self.meta[kind] = { pending: !!snap.metadata.hasPendingWrites, fromCache: !!snap.metadata.fromCache };
+        self.onStatus(self.status());
+        const first = kind === 'data' ? !gotData : !gotTx;
+        if (kind === 'data') gotData = true; else gotTx = true;
+        if (first) return ready();
+        // Cambios hechos en OTRO dispositivo (no los nuestros pendientes).
+        if (!snap.metadata.hasPendingWrites && snap.docChanges().length) {
+          clearTimeout(self._remoteTimer);
+          self._remoteTimer = setTimeout(() => self.onRemote(), 250);
+        }
+      };
+      this.unsubs.push(this.fs.onSnapshot(this._dataCol(), { includeMetadataChanges: true }, (s) => handle('data', s), fail));
+      this.unsubs.push(this.fs.onSnapshot(this._txCol(), { includeMetadataChanges: true }, (s) => handle('tx', s), fail));
+    });
+    return this.opened;
+  };
+  P.close = function () { for (const u of this.unsubs) { try { u(); } catch (_) {} } this.unsubs = []; this.opened = null; };
+
+  P._applyData = function (snap) {
+    for (const s of this.stores) if (s !== 'transactions') this.data[s] = new Map();
+    snap.forEach((d) => {
+      if (d.id === 'transactions' || !this.data[d.id]) return;
+      const items = (d.data() || {}).items || {};
+      this.data[d.id] = new Map(Object.entries(items));
+    });
+  };
+  P._applyTx = function (snap) {
+    const map = new Map(); this.txMonth = new Map(); this.months = new Set();
+    snap.forEach((d) => {
+      this.months.add(d.id);
+      const items = (d.data() || {}).items || {};
+      for (const [id, rec] of Object.entries(items)) { map.set(id, rec); this.txMonth.set(id, d.id); }
+    });
+    this.data.transactions = map;
+  };
+
+  // ---- escritura: se agrupa por documento y se envía sin esperar al servidor ----
+  P._group = function () { return new Map(); };
+  P._field = function (groups, ref, id, value) {
+    const key = ref.path;
+    let g = groups.get(key);
+    if (!g) { g = { ref, items: {}, fields: [] }; groups.set(key, g); }
+    g.items[id] = value;
+    g.fields.push(new this.fs.FieldPath('items', id));
+  };
+  P._stage = function (groups, store, puts, dels) {
+    const isTx = store === 'transactions';
+    for (const id of dels || []) {
+      if (!this.data[store].has(id) && !(isTx && this.txMonth.has(id))) continue;
+      this.data[store].delete(id);
+      if (isTx) {
+        const m = this.txMonth.get(id);
+        if (m) this._field(groups, this._txRef(m), id, this.fs.deleteField());
+        this.txMonth.delete(id);
+      } else this._field(groups, this._dataRef(store), id, this.fs.deleteField());
+    }
+    for (const rec of puts || []) {
+      const r = clone(rec);
+      this.data[store].set(r.id, r);
+      if (isTx) {
+        const m = monthOf(r), old = this.txMonth.get(r.id);
+        if (old && old !== m) this._field(groups, this._txRef(old), r.id, this.fs.deleteField());
+        this._field(groups, this._txRef(m), r.id, r);
+        this.txMonth.set(r.id, m); this.months.add(m);
+      } else this._field(groups, this._dataRef(store), r.id, r);
+    }
+  };
+  P._send = function (writes) {
+    // writes: [fn(batch)] — se parte en lotes y se confirma en segundo plano.
+    const self = this;
+    for (let i = 0; i < writes.length; i += CHUNK) {
+      const b = this.fs.writeBatch(this.db);
+      for (const w of writes.slice(i, i + CHUNK)) w(b);
+      b.commit().catch((e) => self.onError(e));
+    }
+    return Promise.resolve();
+  };
+  P._flush = function (groups) {
+    const writes = [];
+    for (const g of groups.values()) writes.push((b) => b.set(g.ref, { items: g.items }, { mergeFields: g.fields }));
+    return this._send(writes);
+  };
+
+  P.getAll = function (store) { return Promise.resolve([...this.data[store].values()].map(clone)); };
+  P.put = function (store, rec) { return this.bulkPut(store, [rec]); };
+  P.bulkPut = function (store, recs) { const g = this._group(); this._stage(g, store, recs, []); return this._flush(g); };
+  P.delete = function (store, id) { return this.bulkDelete(store, [id]); };
+  P.bulkDelete = function (store, ids) { const g = this._group(); this._stage(g, store, [], ids); return this._flush(g); };
+  P.batch = function (ops) { const g = this._group(); for (const o of ops) this._stage(g, o.store, o.put, o.del); return this._flush(g); };
+  P.clear = function (store) {
+    if (store === 'transactions') {
+      const writes = [...this.months].map((m) => (b) => b.delete(this._txRef(m)));
+      this.data.transactions = new Map(); this.txMonth = new Map(); this.months = new Set();
+      return this._send(writes);
+    }
+    this.data[store] = new Map();
+    return this._send([(b) => b.set(this._dataRef(store), { items: {} })]);
+  };
+  /** Reemplaza todo el contenido de la cuenta. */
+  P.replaceAll = function (data) {
+    const writes = [];
+    for (const s of this.stores) {
+      if (s === 'transactions') continue;
+      const items = {};
+      for (const r of data[s] || []) items[r.id] = clone(r);
+      this.data[s] = new Map(Object.entries(items));
+      writes.push((b) => b.set(this._dataRef(s), { items }));
+    }
+    const byMonth = new Map();
+    for (const r of data.transactions || []) { const m = monthOf(r); if (!byMonth.has(m)) byMonth.set(m, {}); byMonth.get(m)[r.id] = clone(r); }
+    for (const m of this.months) if (!byMonth.has(m)) writes.push((b) => b.delete(this._txRef(m)));
+    this.data.transactions = new Map(); this.txMonth = new Map(); this.months = new Set();
+    for (const [m, items] of byMonth) {
+      writes.push((b) => b.set(this._txRef(m), { items }));
+      this.months.add(m);
+      for (const [id, r] of Object.entries(items)) { this.data.transactions.set(id, r); this.txMonth.set(id, m); }
+    }
+    return this._send(writes);
+  };
+  P.estimate = function () {
+    let tx = 0; const sizes = [];
+    for (const m of this.months) { let n = 0; for (const v of this.txMonth.values()) if (v === m) n++; sizes.push(n); tx += n; }
+    return Promise.resolve({ kind: 'Nube (Firebase)' + (this.account ? ' · ' + this.account : ''), persisted: true, usage: null, quota: null, cloud: true, months: this.months.size, maxPerMonth: Math.max(0, ...sizes) });
+  };
+  P.requestPersistence = function () { return Promise.resolve(true); };
+
+  // ============================== Controlador ==============================
+  function readState() { try { return JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch (_) { return {}; } }
+  function writeState(patch) { const s = Object.assign(readState(), patch); try { localStorage.setItem(KEY, JSON.stringify(s)); } catch (_) {} return s; }
+
+  /** Extrae { apiKey, authDomain, projectId, appId, … } de lo que se pegue (JSON o el fragmento de código de Firebase). */
+  function parseConfig(text) {
+    if (!text) return null;
+    if (typeof text === 'object') return text && text.apiKey && text.projectId ? text : null;
+    const out = {};
+    for (const k of ['apiKey', 'authDomain', 'projectId', 'storageBucket', 'messagingSenderId', 'appId']) {
+      const m = new RegExp('["\']?' + k + '["\']?\\s*:\\s*["\']([^"\']+)["\']').exec(text);
+      if (m) out[k] = m[1].trim();
+    }
+    if (!out.apiKey || !out.projectId) return null;
+    if (!out.authDomain) out.authDomain = out.projectId + '.firebaseapp.com';
+    return out;
+  }
+
+  const ERR = {
+    'auth/invalid-email': 'El correo no es válido.',
+    'auth/missing-password': 'Escribe la contraseña.',
+    'auth/weak-password': 'La contraseña debe tener al menos 6 caracteres.',
+    'auth/email-already-in-use': 'Ya existe una cuenta con ese correo. Usa «Entrar».',
+    'auth/invalid-credential': 'Correo o contraseña incorrectos.',
+    'auth/wrong-password': 'Correo o contraseña incorrectos.',
+    'auth/user-not-found': 'No hay una cuenta con ese correo.',
+    'auth/too-many-requests': 'Demasiados intentos. Espera unos minutos.',
+    'auth/network-request-failed': 'Sin conexión. Necesitas internet para iniciar sesión.',
+    'auth/popup-closed-by-user': 'Cerraste la ventana de Google antes de terminar.',
+    'auth/popup-blocked': 'El navegador bloqueó la ventana de Google.',
+    'auth/operation-not-allowed': 'Ese método de inicio de sesión no está activado en tu proyecto de Firebase (Authentication → Método de acceso).',
+    'auth/unauthorized-domain': 'Este dominio no está autorizado en Firebase (Authentication → Configuración → Dominios autorizados).',
+    'auth/api-key-not-valid.-please-pass-a-valid-api-key.': 'La configuración de Firebase no es válida (apiKey).',
+    'auth/invalid-api-key': 'La configuración de Firebase no es válida (apiKey).',
+    'permission-denied': 'Firebase rechazó el acceso: revisa las reglas de Firestore.',
+    'unavailable': 'Sin conexión con la nube: los cambios se guardan aquí y se suben al volver internet.',
+    'resource-exhausted': 'Se alcanzó el límite gratuito diario de Firebase. Los cambios quedan guardados en este dispositivo y se subirán mañana.',
+    'failed-precondition': 'La nube no está lista (¿creaste la base de datos Firestore?).',
+    'first-sync': 'Necesitas internet la primera vez que abres tu cuenta en este dispositivo.',
+    'not-found': 'No existe la base de datos Firestore en tu proyecto. Créala en la consola de Firebase.'
+  };
+  function errorText(e) {
+    if (!e) return 'Error desconocido.';
+    return ERR[e.code] || ERR[(e.code || '').replace(/^firestore\//, '')] || e.message || String(e);
+  }
+
+  const cloud = {
+    sdk: null, app: null, auth: null, db: null, user: null, adapter: null,
+    config() { return parseConfig(readState().config) || parseConfig((F.config || {}).firebase) || null; },
+    hasBakedConfig() { return !!parseConfig((F.config || {}).firebase); },
+    /** 'cloud' si el usuario eligió cuenta; 'local' si eligió solo este dispositivo. */
+    mode() {
+      const s = readState();
+      if (s.mode) return s.mode;
+      return this.hasBakedConfig() ? 'cloud' : 'local';
+    },
+    enabled() { return this.mode() === 'cloud' && !!this.config() && /^https?:$/.test(location.protocol); },
+    saveConfig(text) { const c = parseConfig(text); if (!c) return null; writeState({ config: c }); return c; },
+    setMode(m) { writeState({ mode: m }); },
+    migratedFor(uid) { return !!(readState().migrated || {})[uid]; },
+    markMigrated(uid) { const s = readState(); const m = Object.assign({}, s.migrated || {}, { [uid]: true }); writeState({ migrated: m }); },
+
+    loadSDK() {
+      if (window.FirebaseSDK) return Promise.resolve(window.FirebaseSDK);
+      return new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = 'js/vendor/firebase-sdk.js';
+        s.onload = () => window.FirebaseSDK ? resolve(window.FirebaseSDK) : reject(new Error('No se pudo cargar Firebase.'));
+        s.onerror = () => reject(new Error('No se pudo cargar Firebase (abre la app con internet una vez).'));
+        document.head.appendChild(s);
+      });
+    },
+    /** Inicia Firebase y espera a saber si hay sesión (funciona sin internet si ya habías entrado). */
+    async boot() {
+      const fb = this.sdk = await this.loadSDK();
+      const cfg = this.config();
+      this.app = fb.getApps().length ? fb.getApps()[0] : fb.initializeApp(cfg);
+      this.auth = fb.initializeAuth(this.app, { persistence: [fb.indexedDBLocalPersistence, fb.browserLocalPersistence], popupRedirectResolver: fb.browserPopupRedirectResolver });
+      let cache;
+      try { cache = fb.persistentLocalCache({ tabManager: fb.persistentMultipleTabManager() }); } catch (_) { cache = fb.memoryLocalCache(); }
+      this.db = fb.initializeFirestore(this.app, { localCache: cache, ignoreUndefinedProperties: true });
+      if (cfg.emulatorHost) {   // solo para pruebas locales con el emulador de Firebase
+        fb.connectAuthEmulator(this.auth, 'http://' + cfg.emulatorHost + ':9099', { disableWarnings: true });
+        fb.connectFirestoreEmulator(this.db, cfg.emulatorHost, 8080);
+      }
+      this.user = await new Promise((resolve) => { const off = fb.onAuthStateChanged(this.auth, (u) => { off(); resolve(u); }); });
+      return this.user;
+    },
+    makeAdapter(stores, handlers) {
+      const uid = this.user.uid;
+      const synced = !!(readState().synced || {})[uid];
+      this.adapter = new FirestoreAdapter(stores, Object.assign({
+        fs: this.sdk, db: this.db, uid, account: this.user.email || '', everSynced: synced,
+        onSynced: () => { const s = readState(); writeState({ synced: Object.assign({}, s.synced || {}, { [uid]: true }) }); }
+      }, handlers));
+      return this.adapter;
+    },
+    async signIn(email, pass) { return (await this.sdk.signInWithEmailAndPassword(this.auth, email, pass)).user; },
+    async signUp(email, pass) { return (await this.sdk.createUserWithEmailAndPassword(this.auth, email, pass)).user; },
+    async resetPassword(email) { return this.sdk.sendPasswordResetEmail(this.auth, email); },
+    async google() { const p = new this.sdk.GoogleAuthProvider(); p.setCustomParameters({ prompt: 'select_account' }); return (await this.sdk.signInWithPopup(this.auth, p)).user; },
+    /** Cierra sesión y borra la copia local de la nube de este dispositivo (privacidad). */
+    async signOut() {
+      if (this.adapter) this.adapter.close();
+      try { await this.sdk.signOut(this.auth); } catch (_) {}
+      try { await this.sdk.terminate(this.db); await this.sdk.clearIndexedDbPersistence(this.db); } catch (e) { console.warn(e); }
+      if (this.user) { const s = readState(); const sy = Object.assign({}, s.synced || {}); delete sy[this.user.uid]; writeState({ synced: sy }); }
+    },
+    errorText, parseConfig
+  };
+
+  F.storage = F.storage || {};
+  F.storage.FirestoreAdapter = FirestoreAdapter;
+  F.storage.monthOf = monthOf;
+  F.cloud = cloud;
 })(typeof window !== 'undefined' ? (window.FIN = window.FIN || {}) : (globalThis.FIN = globalThis.FIN || {}));
 
 </script>
@@ -3373,6 +3749,288 @@ body { overscroll-behavior-y: none; }
 })(typeof window !== 'undefined' ? (window.FIN = window.FIN || {}) : (globalThis.FIN = globalThis.FIN || {}));
 
 </script>
+  <script>
+/* js/io/drive.js */
+/* =========================================================================
+ * io/drive.js — Copia automática en Google Drive (opcional).
+ *
+ * - Usa el permiso mínimo `drive.file`: la app solo ve los archivos que ella
+ *   misma crea (la carpeta «Finanzas personales» y su respaldo), nunca el
+ *   resto de tu Drive.
+ * - Sube un respaldo completo (.json) unos segundos después de cada cambio.
+ * - Nunca pisa en silencio lo que haya en Drive: si el archivo cambió desde
+ *   otro dispositivo, se detiene y pide elegir (restaurar o reemplazar).
+ * - No toca el DOM. Todas las dependencias (fetch, token, store…) se pueden
+ *   inyectar, por eso se prueba en Node con un Drive simulado.
+ * - El script de Google se carga solo cuando el usuario conecta Drive.
+ * ========================================================================= */
+(function (F) {
+  'use strict';
+
+  const SCOPE = 'https://www.googleapis.com/auth/drive.file';
+  const FOLDER_NAME = 'Finanzas personales';
+  const FILE_NAME = 'finanzas-respaldo.json';
+  const API = 'https://www.googleapis.com/drive/v3';
+  const UPLOAD = 'https://www.googleapis.com/upload/drive/v3';
+  const KEY = 'finanzas-drive';
+  const DEBOUNCE_MS = 4000;
+
+  function mkErr(kind, message) { const e = new Error(message); e.kind = kind; return e; }
+
+  function create(deps) {
+    const d = Object.assign({
+      fetch: (...a) => fetch(...a),
+      now: () => Date.now(),
+      setTimeout: (...a) => setTimeout(...a),
+      clearTimeout: (...a) => clearTimeout(...a),
+      online: () => (typeof navigator === 'undefined' || navigator.onLine !== false),
+      storage: (typeof localStorage !== 'undefined' ? localStorage : null),
+      config: () => (F.config || {}),
+      getToken: null,      // async (interactive, hint) => { access_token, expires_in }
+      revoke: null
+    }, deps);
+
+    const listeners = [];
+    let st = load();
+    let status = st.connected ? 'idle' : 'off';
+    let detail = '';
+    let remote = null;       // { id, modifiedTime } cuando hay conflicto / datos nuevos
+    let timer = null;
+    let busy = null;
+    let token = readToken();
+
+    // ---------- persistencia local (por dispositivo; NO va dentro de los respaldos) ----------
+    function load() {
+      try { return Object.assign({ connected: false, clientId: '', folderId: null, fileId: null, remoteModified: null, lastSyncAt: null, dirty: false, account: '' }, JSON.parse(d.storage.getItem(KEY) || '{}')); }
+      catch (_) { return { connected: false, clientId: '', folderId: null, fileId: null, remoteModified: null, lastSyncAt: null, dirty: false, account: '' }; }
+    }
+    function save() { try { d.storage.setItem(KEY, JSON.stringify(st)); } catch (_) { /* sin almacenamiento */ } }
+    function readToken() {
+      try { const t = JSON.parse(d.storage.getItem(KEY + '-token') || 'null'); return t && t.exp > d.now() ? t : null; } catch (_) { return null; }
+    }
+    function writeToken(t) { token = t; try { if (t) d.storage.setItem(KEY + '-token', JSON.stringify(t)); else d.storage.removeItem(KEY + '-token'); } catch (_) {} }
+
+    function emit() { for (const fn of listeners) { try { fn(); } catch (e) { console.error(e); } } }
+    function setStatus(s, msg) { status = s; detail = msg || ''; emit(); }
+
+    const clientId = () => (st.clientId || d.config().driveClientId || '').trim();
+
+    // ---------- token ----------
+    async function ensureToken(interactive) {
+      if (token && token.exp > d.now()) return token.value;
+      // Sin gesto del usuario los navegadores bloquean la ventana de Google: solo se pide el permiso al tocar un botón.
+      if (!interactive) throw mkErr('auth', 'Toca «Reconectar» para volver a iniciar sesión con Google (por seguridad, la sesión dura 1 hora).');
+      if (!d.getToken) throw mkErr('auth', 'Inicio de sesión de Google no disponible.');
+      let r;
+      try { r = await d.getToken(!!interactive, st.account || undefined, clientId()); }
+      catch (e) { throw e.kind ? e : mkErr('auth', e.message || 'No se pudo iniciar sesión con Google.'); }
+      writeToken({ value: r.access_token, exp: d.now() + Math.max(60, (r.expires_in || 3600) - 120) * 1000 });
+      return token.value;
+    }
+
+    // ---------- llamadas a la API ----------
+    async function call(tk, url, init) {
+      let res;
+      try { res = await d.fetch(url, Object.assign({}, init, { headers: Object.assign({ Authorization: 'Bearer ' + tk }, (init && init.headers) || {}) })); }
+      catch (e) { throw mkErr('network', 'Sin conexión con Google Drive.'); }
+      if (res.ok) return res;
+      let msg = '';
+      try { const j = await res.json(); msg = (j.error && (j.error.message || j.error)) || ''; } catch (_) {}
+      if (res.status === 401) { writeToken(null); throw mkErr('auth', 'La sesión de Google venció.'); }
+      if (res.status === 404) throw mkErr('notfound', 'No encontrado en Drive.');
+      if (res.status === 403 && /has not been used|disabled|accessNotConfigured/i.test(msg)) throw mkErr('config', 'La API de Google Drive no está activada en tu proyecto de Google Cloud.');
+      if (res.status === 403) throw mkErr('forbidden', msg || 'Google rechazó el permiso.');
+      throw mkErr('http', 'Drive respondió ' + res.status + (msg ? ': ' + msg : ''));
+    }
+    const q = encodeURIComponent;
+
+    async function ensureFolder(tk) {
+      if (st.folderId) {
+        try { const j = await (await call(tk, API + '/files/' + st.folderId + '?fields=id,trashed')).json(); if (!j.trashed) return st.folderId; }
+        catch (e) { if (e.kind !== 'notfound') throw e; }
+        st.folderId = null; st.fileId = null; st.remoteModified = null;
+      }
+      const list = await (await call(tk, API + '/files?fields=files(id)&q=' + q("mimeType='application/vnd.google-apps.folder' and name='" + FOLDER_NAME + "' and trashed=false"))).json();
+      if (list.files && list.files.length) st.folderId = list.files[0].id;
+      else {
+        const made = await (await call(tk, API + '/files?fields=id', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: FOLDER_NAME, mimeType: 'application/vnd.google-apps.folder' }) })).json();
+        st.folderId = made.id;
+      }
+      save();
+      return st.folderId;
+    }
+    async function findFile(tk, folderId) {
+      if (st.fileId) {
+        try { const j = await (await call(tk, API + '/files/' + st.fileId + '?fields=id,modifiedTime,trashed')).json(); if (!j.trashed) return { id: j.id, modifiedTime: j.modifiedTime }; }
+        catch (e) { if (e.kind !== 'notfound') throw e; }
+        st.fileId = null;
+      }
+      const list = await (await call(tk, API + '/files?orderBy=modifiedTime%20desc&fields=files(id,modifiedTime)&q=' + q("name='" + FILE_NAME + "' and '" + folderId + "' in parents and trashed=false"))).json();
+      return list.files && list.files.length ? { id: list.files[0].id, modifiedTime: list.files[0].modifiedTime } : null;
+    }
+    async function upload(tk, folderId, fileId, content) {
+      const b = 'finanzas' + d.now().toString(36);
+      const meta = fileId ? {} : { name: FILE_NAME, parents: [folderId], mimeType: 'application/json' };
+      const body = '--' + b + '\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n' + JSON.stringify(meta) +
+        '\r\n--' + b + '\r\nContent-Type: application/json\r\n\r\n' + content + '\r\n--' + b + '--';
+      const url = (fileId ? UPLOAD + '/files/' + fileId : UPLOAD + '/files') + '?uploadType=multipart&fields=id,modifiedTime';
+      return (await call(tk, url, { method: fileId ? 'PATCH' : 'POST', headers: { 'Content-Type': 'multipart/related; boundary=' + b }, body })).json();
+    }
+    async function loadAccount(tk) {
+      try { const j = await (await call(tk, API + '/about?fields=user(emailAddress)')).json(); if (j.user && j.user.emailAddress) { st.account = j.user.emailAddress; save(); } } catch (_) { /* opcional */ }
+    }
+
+    // ---------- manejo común de errores ----------
+    function fail(e) {
+      if (e.kind === 'auth') { setStatus('needs-auth', e.message); return; }
+      if (e.kind === 'network') { setStatus('offline', e.message); return; }
+      setStatus('error', e.message || 'Error al sincronizar.');
+    }
+    function serialize(fn) {
+      if (busy) return busy;
+      busy = (async () => { try { return await fn(); } finally { busy = null; } })();
+      return busy;
+    }
+
+    // ---------- operaciones ----------
+    /** Sube el respaldo. Si Drive cambió por otro lado, se detiene (salvo force). */
+    function push(opts) {
+      opts = opts || {};
+      if (!st.connected) return Promise.resolve();
+      return serialize(async () => {
+        if (!d.online()) { setStatus('offline', 'Sin internet: se subirá al volver la conexión.'); return; }
+        setStatus('syncing');
+        try {
+          const tk = await ensureToken(!!opts.interactive);
+          const folderId = await ensureFolder(tk);
+          const file = await findFile(tk, folderId);
+          if (file && !opts.force && file.modifiedTime !== st.remoteModified) {
+            remote = file;
+            setStatus(d.store.isEmpty() ? 'remote-newer' : 'conflict', 'Hay un respaldo en Drive distinto al de este dispositivo.');
+            return;
+          }
+          remote = null;
+          st.dirty = false;                                   // si cambia durante la subida, markDirty() lo vuelve a marcar
+          const json = JSON.stringify(d.io.buildBackup(d.store));
+          let out;
+          try { out = await upload(tk, folderId, file ? file.id : null, json); }
+          catch (e) { st.dirty = true; save(); throw e; }
+          st.fileId = out.id; st.remoteModified = out.modifiedTime; st.lastSyncAt = new Date(d.now()).toISOString();
+          save();
+          setStatus(st.dirty ? 'pending' : 'idle');
+          if (st.dirty) schedule();
+        } catch (e) { st.dirty = true; save(); fail(e); }
+      });
+    }
+    function schedule() {
+      if (timer) d.clearTimeout(timer);
+      timer = d.setTimeout(() => { timer = null; return push(); }, DEBOUNCE_MS);
+    }
+    /** Llamar en cada cambio de datos. */
+    function markDirty() {
+      if (!st.connected) return;
+      st.dirty = true; save();
+      if (status === 'conflict' || status === 'remote-newer') return;   // esperando decisión del usuario
+      if (status !== 'needs-auth') setStatus('pending');
+      schedule();
+    }
+    /** Al abrir la app o volver a ella: ¿hay algo nuevo en Drive? */
+    function check() {
+      if (!st.connected) return Promise.resolve();
+      if (st.dirty && status !== 'conflict' && status !== 'remote-newer') return push();
+      return serialize(async () => {
+        if (!d.online() || !(token && token.exp > d.now())) { if (!d.online()) setStatus('offline'); return; }
+        try {
+          const tk = await ensureToken(false);
+          const folderId = await ensureFolder(tk);
+          const file = await findFile(tk, folderId);
+          if (file && file.modifiedTime !== st.remoteModified) { remote = file; setStatus(d.store.isEmpty() ? 'remote-newer' : 'conflict', 'Hay datos más recientes en Drive.'); }
+          else if (status !== 'idle') setStatus('idle');
+        } catch (e) { fail(e); }
+      });
+    }
+    /** Descarga el respaldo de Drive (texto JSON) sin aplicarlo. */
+    async function fetchRemote(interactive) {
+      const tk = await ensureToken(!!interactive);
+      const folderId = await ensureFolder(tk);
+      const file = await findFile(tk, folderId);
+      if (!file) throw mkErr('notfound', 'Todavía no hay un respaldo en tu Drive.');
+      const text = await (await call(tk, API + '/files/' + file.id + '?alt=media')).text();
+      return { text, id: file.id, modifiedTime: file.modifiedTime };
+    }
+    /** Tras importar lo descargado: reemplazar = ya estamos iguales; combinar = hay que subir el resultado. */
+    function adopt(r, replaced) {
+      st.fileId = r.id; st.remoteModified = r.modifiedTime; remote = null;
+      if (replaced) { st.dirty = false; save(); if (timer) { d.clearTimeout(timer); timer = null; } st.lastSyncAt = new Date(d.now()).toISOString(); save(); setStatus('idle'); }
+      else { st.dirty = true; save(); setStatus('pending'); schedule(); }
+    }
+
+    async function connect(id) {
+      if (id !== undefined) { st.clientId = String(id || '').trim(); save(); }
+      if (!clientId()) throw mkErr('config', 'Falta el ID de cliente de Google.');
+      const tk = await ensureToken(true);
+      st.connected = true; st.dirty = true; save();
+      await loadAccount(tk);
+      await push();
+    }
+    function disconnect() {
+      if (timer) { d.clearTimeout(timer); timer = null; }
+      const t = token && token.value;
+      writeToken(null);
+      if (t && d.revoke) { try { d.revoke(t); } catch (_) {} }
+      st = Object.assign(load(), { connected: false, folderId: null, fileId: null, remoteModified: null, lastSyncAt: null, dirty: false, account: '' });
+      st.clientId = st.clientId || '';
+      save(); remote = null; setStatus('off');
+    }
+
+    return {
+      configured: () => !!clientId(),
+      hasConfigClientId: () => !!(d.config().driveClientId || '').trim(),
+      connected: () => !!st.connected,
+      connect, disconnect, push, check, markDirty, fetchRemote, adopt,
+      state: () => ({ status, detail, connected: !!st.connected, dirty: st.dirty, lastSyncAt: st.lastSyncAt, account: st.account, folderId: st.folderId, remote }),
+      folderURL: () => st.folderId ? 'https://drive.google.com/drive/folders/' + st.folderId : null,
+      onChange: (fn) => { listeners.push(fn); },
+      FOLDER_NAME, FILE_NAME
+    };
+  }
+
+  // ---------- Inicio de sesión de Google (Google Identity Services), cargado solo al conectar ----------
+  function browserGetToken() {
+    function loadGIS() {
+      if (window.google && google.accounts && google.accounts.oauth2) return Promise.resolve();
+      return new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = 'https://accounts.google.com/gsi/client'; s.async = true;
+        s.onload = resolve;
+        s.onerror = () => reject(mkErr('network', 'No se pudo cargar el inicio de sesión de Google. ¿Hay internet?'));
+        document.head.appendChild(s);
+      });
+    }
+    return async function (interactive, hint, clientId) {
+      await loadGIS();
+      return new Promise((resolve, reject) => {
+        const client = google.accounts.oauth2.initTokenClient({
+          client_id: clientId, scope: SCOPE, hint: hint || undefined,
+          callback: (r) => r && r.access_token ? resolve(r) : reject(mkErr('auth', (r && (r.error_description || r.error)) || 'Google no concedió el permiso.')),
+          error_callback: (e) => reject(mkErr('auth', e && e.type === 'popup_closed' ? 'Cerraste la ventana de Google antes de terminar.' : e && e.type === 'popup_failed_to_open' ? 'El navegador bloqueó la ventana de Google. Toca de nuevo el botón.' : 'No se pudo iniciar sesión con Google.'))
+        });
+        client.requestAccessToken({ prompt: interactive && !hint ? 'select_account' : '' });
+      });
+    };
+  }
+
+  F.driveCreate = create;
+  if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+    F.drive = create({
+      getToken: browserGetToken(),
+      revoke: (t) => { if (window.google && google.accounts && google.accounts.oauth2) google.accounts.oauth2.revoke(t, () => {}); },
+      store: F.Store, io: F.io
+    });
+  }
+})(typeof window !== 'undefined' ? (window.FIN = window.FIN || {}) : (globalThis.FIN = globalThis.FIN || {}));
+
+</script>
   <!-- Interfaz -->
   <script>
 /* js/ui/dom.js */
@@ -4746,7 +5404,7 @@ body { overscroll-behavior-y: none; }
     return '<section class="welcome">' +
       '<h1>Tu sistema financiero personal</h1>' +
       '<p>Registra ingresos, gastos, ahorro, inversiones y deudas. Con el tiempo verás cómo evolucionan tu flujo de caja y tu patrimonio.</p>' +
-      '<div class="privacy-note">' + ui.icon('lock') + '<div><strong>Tus datos se quedan en este dispositivo.</strong> Se guardan en el almacenamiento local del navegador (IndexedDB). No se envían a ningún servidor, no hay analítica ni publicidad. Exporta respaldos con frecuencia.</div></div>' +
+      (F.Store.adapter && F.Store.adapter.kind === 'firestore' ? '<div class="privacy-note">' + ui.icon('lock') + '<div><strong>Tus datos están en tu cuenta.</strong> Se sincronizan con todos tus dispositivos y solo tu usuario puede leerlos. Sin internet sigues trabajando: los cambios se suben solos al reconectar.</div></div>' : '<div class="privacy-note">' + ui.icon('lock') + '<div><strong>Tus datos se quedan en este dispositivo.</strong> Se guardan en el almacenamiento local del navegador (IndexedDB). No se envían a ningún servidor, no hay analítica ni publicidad. Exporta respaldos con frecuencia.</div></div>') +
       '<ol class="steps"><li><strong>Crea tus cuentas</strong> con su saldo de hoy (banco, Nequi, efectivo, tarjeta…).</li><li><strong>Registra movimientos</strong> con el botón <b>+</b>: valor, categoría, cuenta y listo.</li><li><strong>Añade</strong> metas, presupuestos, inversiones y deudas cuando quieras.</li></ol>' +
       '<div class="welcome-actions"><button class="btn primary" data-act="new-account">' + ui.icon('wallet') + 'Crear mi primera cuenta</button>' +
       '<button class="btn" data-act="load-demo">Cargar datos de ejemplo</button>' +
@@ -4871,6 +5529,7 @@ body { overscroll-behavior-y: none; }
   function backupNudge() {
     const st = St.settings();
     if (St.isEmpty()) return '';
+    if (St.adapter && St.adapter.kind === 'firestore') return '';   // ya están en la nube
     const last = st.lastBackupAt ? U.daysBetween(st.lastBackupAt.slice(0, 10), U.today()) : null;
     if (last !== null && last < 30) return '';
     return '<div class="nudge">' + ui.icon('shield') + '<span>' + (last === null ? 'Aún no has exportado un respaldo.' : 'Tu último respaldo fue hace ' + last + ' días.') + ' Los datos viven solo en este navegador.</span><button class="btn small" data-act="export-backup">Exportar respaldo</button></div>';
@@ -5777,6 +6436,11 @@ body { overscroll-behavior-y: none; }
     if (!file) return;
     let text;
     try { text = await ui.readText(file); } catch (e) { ui.toast(e.message, { type: 'error' }); return; }
+    showImport(text, file.name, file.size, {});
+  }
+  /** Valida y muestra el diálogo de importación (archivo local o respaldo de Drive). opts.onApplied(mode) */
+  function showImport(text, fileName, fileSize, opts) {
+    const file = { name: fileName, size: fileSize };
     const parsed = IO.parseJSONText(text);
     const v = parsed.ok ? IO.validateBackup(parsed.value) : { ok: false, fatal: [parsed.error], invalid: [] };
     const names = { accounts: 'Cuentas', categories: 'Categorías', transactions: 'Movimientos', recurring: 'Recurrentes', budgets: 'Presupuestos', goals: 'Metas', investments: 'Inversiones', debts: 'Deudas', assets: 'Otros activos', settings: 'Configuración' };
@@ -5801,6 +6465,7 @@ body { overscroll-behavior-y: none; }
       const total = Object.values(counts).reduce((a, b) => a + b, 0);
       m.close();
       ui.toast(total ? 'Se agregaron ' + U.plainNumber(total) + ' registro(s).' : 'No había registros nuevos: todo ya existía.');
+      if (opts.onApplied) opts.onApplied('merge');
     });
     m.el.querySelector('[data-replace]').addEventListener('click', async () => {
       if (!ackOk()) return;
@@ -5811,7 +6476,7 @@ body { overscroll-behavior-y: none; }
       const keepSettings = St.settings();
       const incomingSettings = (data.settings || []).find(s => s.id === 'main');
       data.settings = [Object.assign({}, keepSettings, incomingSettings || {}, { id: 'main', privacyNoticeSeen: true })];
-      try { await St.replaceAll(data); m.close(); ui.toast('Datos reemplazados correctamente.'); }
+      try { await St.replaceAll(data); m.close(); ui.toast('Datos reemplazados correctamente.'); if (opts.onApplied) opts.onApplied('replace'); }
       catch (e) { ui.toast('No se pudo importar: ' + e.message + '. Tus datos no cambiaron.', { type: 'error', timeout: 8000 }); }
     });
   }
@@ -5883,13 +6548,84 @@ body { overscroll-behavior-y: none; }
     location.hash = '#/';
   }
 
+
+  // ================================ GOOGLE DRIVE ================================
+  async function driveConnect(inputEl) {
+    const D = F.drive;
+    const id = inputEl ? inputEl.value.trim() : undefined;
+    if (inputEl && !/\.apps\.googleusercontent\.com$/.test(id)) { ui.toast('El ID de cliente debe terminar en «.apps.googleusercontent.com».', { type: 'error', timeout: 6000 }); return; }
+    try { await D.connect(id); ui.toast('Google Drive conectado.'); }
+    catch (e) { ui.toast(e.message || 'No se pudo conectar con Google.', { type: 'error', timeout: 7000 }); }
+  }
+  async function driveRestore() {
+    try {
+      ui.toast('Descargando de Drive…');
+      const r = await F.drive.fetchRemote(true);
+      showImport(r.text, 'Google Drive · ' + F.drive.FILE_NAME, r.text.length, { onApplied: (mode) => F.drive.adopt(r, mode === 'replace') });
+    } catch (e) { ui.toast(e.message || 'No se pudo descargar de Drive.', { type: 'error', timeout: 7000 }); }
+  }
+  async function driveOverwrite() {
+    const ok = await ui.confirmDialog({ title: 'Reemplazar el respaldo de Drive', html: '<p>Se sobrescribirá el respaldo que hay en Drive con los datos de <b>este dispositivo</b>.</p><p>Si el de Drive tenía datos más recientes (por ejemplo, de otro celular), se perderán. Drive conserva versiones anteriores del archivo por un tiempo.</p>', confirmText: 'Reemplazar en Drive', danger: true });
+    if (ok) F.drive.push({ force: true, interactive: true });
+  }
+  async function driveDisconnect() {
+    const ok = await ui.confirmDialog({ title: 'Desconectar Google Drive', html: '<p>Dejará de sincronizarse. Tus datos en este dispositivo y el respaldo que ya está en tu Drive <b>no se borran</b>.</p>', confirmText: 'Desconectar' });
+    if (ok) { F.drive.disconnect(); ui.toast('Google Drive desconectado.'); }
+  }
+  const DRIVE_STATUS = {
+    idle: ['check', 'Al día'], pending: ['clock', 'Cambios pendientes de subir…'], syncing: ['clock', 'Sincronizando…'],
+    'needs-auth': ['alert', 'Hay que volver a iniciar sesión con Google'], offline: ['alert', 'Sin conexión: se subirá cuando vuelva internet'],
+    conflict: ['alert', 'Drive tiene un respaldo distinto al de este dispositivo'], 'remote-newer': ['download', 'Ya hay un respaldo en tu Drive'], error: ['alert', 'Error al sincronizar']
+  };
+  function driveCard() {
+    const D = F.drive;
+    if (!D) return '';
+    if (St.adapter && St.adapter.kind === 'firestore' && !D.connected()) return '';
+    const s = D.state();
+    let body;
+    if (!s.connected) {
+      body = '<p>Guarda una copia al día de tus datos en una carpeta de <b>tu propio Google Drive</b>. Si cambias de celular o borras el navegador, los recuperas desde ahí.</p>' +
+        '<p class="muted small">Usa el permiso mínimo: la app solo ve la carpeta «' + esc(D.FOLDER_NAME) + '» que ella misma crea, nunca el resto de tu Drive. Sin conectar, la app no hace ninguna conexión a internet.</p>' +
+        (D.hasConfigClientId() ? '' :
+          '<label class="field"><span class="lbl">ID de cliente de Google</span><input type="text" data-drive-id inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="123456-abc.apps.googleusercontent.com"><span class="hint">Se crea una sola vez, gratis, en Google Cloud (pasos abajo).</span></label>') +
+        '<div class="btn-row"><button class="btn primary" data-drive-connect>' + ui.icon('upload') + 'Conectar Google Drive</button></div>' +
+        '<details class="drive-help"><summary>¿Cómo obtengo el ID de cliente?</summary><ol class="small">' +
+        '<li>Entra a <b>console.cloud.google.com</b> con tu cuenta de Google y crea un proyecto (nombre libre).</li>' +
+        '<li><b>APIs y servicios → Biblioteca</b>: busca «Google Drive API» y pulsa <b>Habilitar</b>.</li>' +
+        '<li><b>Pantalla de consentimiento OAuth</b> (o «Google Auth Platform»): tipo <b>Externo</b>, nombre «Finanzas personales», tu correo. En <b>Permisos</b> agrega <code>…/auth/drive.file</code>. Luego pulsa <b>Publicar aplicación</b> (así no caduca).</li>' +
+        '<li><b>Credenciales → Crear credenciales → ID de cliente de OAuth</b>, tipo <b>Aplicación web</b>. En <b>Orígenes de JavaScript autorizados</b> agrega exactamente <code>' + esc(location.origin) + '</code> (sin «/» al final).</li>' +
+        '<li>Copia el ID que termina en <code>.apps.googleusercontent.com</code> y pégalo arriba.</li></ol></details>';
+    } else {
+      const [ico, label] = DRIVE_STATUS[s.status] || DRIVE_STATUS.idle;
+      body = '<p class="drive-status">' + ui.icon(ico, 'tiny') + ' <b>' + esc(label) + '</b>' + (s.account ? ' · ' + esc(s.account) : '') + '</p>' +
+        (s.detail && s.status !== 'idle' ? '<p class="muted small">' + esc(s.detail) + '</p>' : '') +
+        '<p class="muted small">Última copia en Drive: ' + (s.lastSyncAt ? esc(U.dateLabel(s.lastSyncAt.slice(0, 10))) + ' ' + new Date(s.lastSyncAt).toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' }) : 'todavía ninguna') + '</p>' +
+        ((s.status === 'conflict' || s.status === 'remote-newer') ? '<div class="alert warn">' + ui.icon('alert') + '<div><strong>Elige cómo seguir</strong><p>' + (s.status === 'remote-newer' ? 'Encontré un respaldo en tu Drive y aquí aún no hay datos.' : 'El respaldo de Drive cambió desde otro dispositivo y aquí también hay datos.') + ' Mientras no elijas, no se sube nada.</p>' +
+          '<div class="btn-row"><button class="btn primary" data-drive-restore>Ver y restaurar desde Drive</button>' + (s.status === 'conflict' ? '<button class="btn danger" data-drive-overwrite>Reemplazar Drive con mis datos</button>' : '') + '</div></div></div>' : '') +
+        '<div class="btn-row"><button class="btn" data-drive-sync>' + ui.icon('repeat') + 'Sincronizar ahora</button>' +
+        (s.status === 'conflict' || s.status === 'remote-newer' ? '' : '<button class="btn" data-drive-restore>Restaurar desde Drive</button>') +
+        (D.folderURL() ? '<a class="btn ghost" href="' + esc(D.folderURL()) + '" target="_blank" rel="noopener">Abrir carpeta</a>' : '') + '</div>' +
+        '<div class="btn-row"><button class="btn ghost small" data-drive-off>Desconectar</button></div>';
+    }
+    return vh.card('Google Drive', body, { icon: 'shield', cls: 'drive-card' });
+  }
+  function bindDrive(el) {
+    const on = (sel, fn) => el.querySelectorAll(sel).forEach(b => b.addEventListener('click', fn));
+    on('[data-drive-connect]', () => driveConnect(el.querySelector('[data-drive-id]')));
+    on('[data-drive-sync]', () => F.drive.push({ interactive: true }));
+    on('[data-drive-restore]', driveRestore);
+    on('[data-drive-overwrite]', driveOverwrite);
+    on('[data-drive-off]', driveDisconnect);
+  }
+
   // ================================ AJUSTES ================================
   async function ajustes(el) {
     const st = St.settings();
     const counts = S.STORES.filter(s => s !== 'settings').map(s => [s, St.all(s).length]);
     const names = { accounts: 'Cuentas', categories: 'Categorías', transactions: 'Movimientos', recurring: 'Recurrentes', budgets: 'Presupuestos', goals: 'Metas', investments: 'Inversiones', debts: 'Deudas', assets: 'Otros activos' };
     el.innerHTML = '<div class="page">' + vh.pageHead('Datos y ajustes', '') +
-      '<section class="card privacy">' + ui.icon('lock') + '<div><h2>Privacidad</h2><p>Tus datos se almacenan <b>solo en este dispositivo</b>, dentro del navegador (IndexedDB). La aplicación no tiene servidor, no envía información a ningún lugar, no usa analítica ni publicidad y funciona sin conexión.</p><p class="muted small">Si borras los datos del navegador, cambias de equipo o usas modo incógnito, los datos no estarán. Por eso es importante exportar respaldos.</p></div></section>' +
+      '<section class="card privacy">' + ui.icon('lock') + '<div><h2>Privacidad</h2>' + (St.adapter.kind === 'firestore' ? '<p>Tus datos se guardan en <b>tu cuenta</b> (tu proyecto de Firebase en Google) y solo tu usuario puede leerlos. Este dispositivo guarda una copia para usar la app sin conexión. No hay analítica ni publicidad.</p></div></section>' : '<p>Tus datos se almacenan <b>solo en este dispositivo</b>, dentro del navegador (IndexedDB). La aplicación no tiene servidor propio, no usa analítica ni publicidad y funciona sin conexión. Solo si <b>tú</b> conectas Google Drive, envía una copia a tu propia cuenta de Google.</p><p class="muted small">Si borras los datos del navegador, cambias de equipo o usas modo incógnito, los datos no estarán. Por eso es importante exportar respaldos.</p></div></section>') +
+      (F.account ? F.account.card() : '') +
       '<div class="grid-2">' +
       vh.card('Copias de seguridad', '<p>Exporta un archivo <code>financial-backup-AAAA-MM-DD.json</code> con todos tus datos y guárdalo en un lugar seguro (nube personal, USB).</p>' +
         '<p class="muted small">Último respaldo: ' + (st.lastBackupAt ? esc(U.dateLabel(st.lastBackupAt.slice(0, 10))) : 'nunca') + '</p>' +
@@ -5899,13 +6635,14 @@ body { overscroll-behavior-y: none; }
         '<button class="btn" data-csv="tx">Movimientos</button><button class="btn" data-csv="monthly">Resumen mensual</button><button class="btn" data-csv="zip">Todo (.zip)</button></div>' +
         '<h3 class="h3">Importar movimientos desde CSV</h3><p class="muted small">Columnas mínimas: fecha, valor, cuenta. Opcionales: tipo, categoría, subcategoría, descripción, etiquetas, notas… Si no hay columna «tipo», los valores negativos se toman como gastos.</p>' +
         '<div class="btn-row"><button class="btn" data-act="import-csv">' + ui.icon('upload') + 'Importar CSV</button><button class="btn ghost" data-tpl>Descargar plantilla</button></div>') + '</div>' +
+      driveCard() +
       '<div class="grid-2">' +
       vh.card('Preferencias', '<label class="field"><span class="lbl">Moneda principal</span><select data-set="currency">' + ui.options(Object.fromEntries(Object.entries(U.CURRENCIES).map(([k, c]) => [k, k + ' · ' + c.name])), st.currency) + '</select><span class="hint">Define el formato y qué cuentas se suman a los totales. No convierte monedas: las cuentas en otra moneda se muestran aparte.</span></label>' +
         '<label class="field"><span class="lbl">Apariencia</span><select data-set="theme">' + ui.options({ auto: 'Automática (según el sistema)', light: 'Clara', dark: 'Oscura' }, st.theme || 'auto') + '</select></label>') +
       vh.card('Datos de ejemplo', '<p>Carga 12 meses de información ficticia para explorar gráficos, análisis y filtros. Se marcan como «demo» y se pueden eliminar sin afectar tus datos reales.</p><div class="btn-row">' +
         (St.hasDemo() ? '<button class="btn danger" data-act="remove-demo">Eliminar datos de ejemplo</button>' : '<button class="btn" data-act="load-demo">Cargar datos de ejemplo</button>') + '</div>') + '</div>' +
       '<div class="grid-2">' + vh.card('Almacenamiento', '<div data-storage><p class="muted">Consultando…</p></div><table class="tbl compact"><tbody>' + counts.map(([k, n]) => '<tr><th>' + names[k] + '</th><td>' + U.plainNumber(n) + '</td></tr>').join('') + '</tbody></table>') +
-      vh.card('Zona de cuidado', '<p>Elimina todos los datos de este navegador. Se descargará un respaldo antes de borrar.</p><button class="btn danger" data-wipe>Borrar todos los datos</button>', { cls: 'danger-zone' }) + '</div>' +
+      vh.card('Zona de cuidado', '<p>' + (St.adapter.kind === 'firestore' ? 'Elimina todos los datos de <b>tu cuenta</b> (en todos tus dispositivos).' : 'Elimina todos los datos de este navegador.') + ' Se descargará un respaldo antes de borrar.</p><button class="btn danger" data-wipe>Borrar todos los datos</button>', { cls: 'danger-zone' }) + '</div>' +
       '<p class="muted small center">Finanzas personales · formato de datos v' + S.SCHEMA_VERSION + ' · todo funciona localmente</p></div>';
     el.querySelectorAll('[data-set]').forEach(s => s.addEventListener('change', async () => {
       await St.saveSettings({ [s.dataset.set]: s.value });
@@ -5920,6 +6657,8 @@ body { overscroll-behavior-y: none; }
     }));
     el.querySelector('[data-tpl]').addEventListener('click', () => ui.download('plantilla-movimientos.csv', IO.csvTemplate(), 'text/csv;charset=utf-8'));
     el.querySelector('[data-wipe]').addEventListener('click', wipeAll);
+    bindDrive(el);
+    if (F.account) F.account.bind(el);
     const info = await St.adapter.estimate();
     const host = el.querySelector('[data-storage]');
     if (host) {
@@ -5948,8 +6687,204 @@ body { overscroll-behavior-y: none; }
     ajustes: { title: 'Datos y ajustes', render: ajustes },
     mas: { title: 'Más', render: mas }
   });
-  F.actions = Object.assign(F.actions || {}, { exportBackup, importBackup, importCSV, loadDemo, removeDemo, wipeAll });
+  F.actions = Object.assign(F.actions || {}, { exportBackup, importBackup, importBackupText: showImport, importCSV, loadDemo, removeDemo, wipeAll });
 })(typeof window !== 'undefined' ? (window.FIN = window.FIN || {}) : (globalThis.FIN = globalThis.FIN || {}));
+
+</script>
+  <script>
+/* js/ui/views/account.js */
+/* =========================================================================
+ * ui/views/account.js — Cuenta en la nube: pantalla de inicio de sesión,
+ * tarjeta en «Datos y ajustes» y paso de datos locales a la cuenta.
+ * ========================================================================= */
+(function (F) {
+  'use strict';
+  const U = F.utils, S = F.schema, St = F.Store, ui = F.ui, vh = F.vh, IO = F.io, C = F.cloud;
+  const esc = U.escapeHTML;
+  const LOGO = '<svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14"/><path d="M14 44 26 30l9 8 15-17"/></svg>';
+
+  // ============================ Inicio de sesión ============================
+  function showLogin(errorMsg) {
+    document.body.classList.remove('booting');
+    document.body.classList.add('auth-mode');
+    const view = document.getElementById('view');
+    let signup = false;
+    view.innerHTML = '<div class="auth"><div class="auth-card">' +
+      '<div class="auth-brand brand-mini">' + LOGO + '</div>' +
+      '<h1>Finanzas personales</h1><p class="muted" data-sub>Entra con tu cuenta para ver tus datos en cualquier dispositivo.</p>' +
+      '<form data-auth novalidate>' +
+      '<label class="field"><span class="lbl">Correo</span><input type="email" name="email" autocomplete="username" inputmode="email" autocapitalize="off" spellcheck="false" required></label>' +
+      '<label class="field"><span class="lbl">Contraseña</span><input type="password" name="pass" autocomplete="current-password" minlength="6" required></label>' +
+      '<label class="field" data-confirm hidden><span class="lbl">Repite la contraseña</span><input type="password" name="pass2" autocomplete="new-password" minlength="6"></label>' +
+      '<p class="auth-err" role="alert">' + (errorMsg ? esc(errorMsg) : '') + '</p>' +
+      '<button class="btn primary block" type="submit" data-submit>Entrar</button>' +
+      '</form>' +
+      '<div class="auth-links"><button class="link-btn" type="button" data-toggle>¿No tienes cuenta? Crear una</button><button class="link-btn" type="button" data-reset>¿Olvidaste tu contraseña?</button></div>' +
+      '<div class="auth-or"><span>o</span></div>' +
+      '<button class="btn block" type="button" data-google><svg class="ico" viewBox="0 0 24 24"><path d="M21 12.2c0-.7-.1-1.4-.2-2H12v3.8h5.1a4.4 4.4 0 0 1-1.9 2.9v2.4h3.1c1.8-1.7 2.7-4.1 2.7-7.1zM12 21c2.6 0 4.7-.9 6.3-2.3l-3.1-2.4c-.9.6-2 .9-3.2.9-2.5 0-4.6-1.7-5.3-3.9H3.5v2.5A9.5 9.5 0 0 0 12 21zM6.7 13.3a5.6 5.6 0 0 1 0-3.6V7.2H3.5a9.5 9.5 0 0 0 0 8.6zM12 6.3c1.4 0 2.6.5 3.6 1.4l2.7-2.7A9.5 9.5 0 0 0 3.5 7.2l3.2 2.5C7.4 7.9 9.5 6.3 12 6.3z"/></svg>Continuar con Google</button>' +
+      '<p class="auth-local"><button class="link-btn" type="button" data-local>Usar sin cuenta (solo en este dispositivo)</button></p>' +
+      '<p class="muted small center">' + ui.icon('lock', 'tiny') + ' Solo tu usuario puede leer tus datos. También quedan guardados en este dispositivo para usar la app sin internet.</p>' +
+      '</div></div>';
+    const $ = (s) => view.querySelector(s);
+    const form = $('[data-auth]'), err = $('.auth-err'), submit = $('[data-submit]');
+    const setErr = (m) => { err.textContent = m || ''; };
+    const busy = (on) => view.querySelectorAll('button,input').forEach(b => { b.disabled = on; });
+    const done = () => { C.setMode('cloud'); location.reload(); };
+
+    $('[data-toggle]').addEventListener('click', () => {
+      signup = !signup;
+      $('[data-confirm]').hidden = !signup;
+      submit.textContent = signup ? 'Crear cuenta' : 'Entrar';
+      $('[data-toggle]').textContent = signup ? '¿Ya tienes cuenta? Entrar' : '¿No tienes cuenta? Crear una';
+      form.pass.autocomplete = signup ? 'new-password' : 'current-password';
+      $('[data-sub]').textContent = signup ? 'Crea tu cuenta con un correo y una contraseña (mínimo 6 caracteres).' : 'Entra con tu cuenta para ver tus datos en cualquier dispositivo.';
+      setErr('');
+    });
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const email = form.email.value.trim(), pass = form.pass.value;
+      if (!/^\S+@\S+\.\S+$/.test(email)) return setErr('Escribe un correo válido.');
+      if (pass.length < 6) return setErr('La contraseña debe tener al menos 6 caracteres.');
+      if (signup && pass !== form.pass2.value) return setErr('Las contraseñas no coinciden.');
+      setErr(''); busy(true);
+      try { if (signup) await C.signUp(email, pass); else await C.signIn(email, pass); done(); }
+      catch (ex) { busy(false); setErr(C.errorText(ex)); }
+    });
+    $('[data-reset]').addEventListener('click', async () => {
+      const email = form.email.value.trim();
+      if (!/^\S+@\S+\.\S+$/.test(email)) { setErr('Escribe tu correo arriba y vuelve a tocar «¿Olvidaste tu contraseña?».'); form.email.focus(); return; }
+      busy(true);
+      try { await C.resetPassword(email); setErr(''); ui.toast('Te enviamos un correo para crear una nueva contraseña (revisa también spam).', { timeout: 7000 }); }
+      catch (ex) { setErr(C.errorText(ex)); }
+      busy(false);
+    });
+    $('[data-google]').addEventListener('click', async () => {
+      setErr(''); busy(true);
+      try { await C.google(); done(); }
+      catch (ex) { busy(false); setErr(C.errorText(ex) + (/popup/.test(ex.code || '') ? ' Si usas la app instalada en iPhone, entra con correo y contraseña.' : '')); }
+    });
+    $('[data-local]').addEventListener('click', () => { C.setMode('local'); location.reload(); });
+  }
+
+  /** Hay sesión pero falta la primera sincronización (sin internet). */
+  function showOffline(msg) {
+    document.body.classList.remove('booting');
+    document.body.classList.add('auth-mode');
+    const view = document.getElementById('view');
+    view.innerHTML = '<div class="auth"><div class="auth-card">' +
+      '<div class="auth-brand brand-mini">' + LOGO + '</div><h1>Sin conexión</h1>' +
+      '<p>' + esc(msg || 'Necesitas internet la primera vez que abres tu cuenta en este dispositivo.') + '</p>' +
+      '<p class="muted small">Después de esa primera vez, la app funciona sin internet y sube los cambios cuando vuelve la conexión.</p>' +
+      '<button class="btn primary block" type="button" data-retry>Reintentar</button>' +
+      '<p class="auth-local"><button class="link-btn" type="button" data-local>Usar sin cuenta mientras tanto</button></p></div></div>';
+    view.querySelector('[data-retry]').addEventListener('click', () => location.reload());
+    view.querySelector('[data-local]').addEventListener('click', () => { C.setMode('local'); location.reload(); });
+    window.addEventListener('online', () => location.reload(), { once: true });
+  }
+
+  // ===================== Pasar datos de este dispositivo a la cuenta =====================
+  async function maybeMigrate() {
+    if (!C.user || C.migratedFor(C.user.uid)) return;
+    let local;
+    try {
+      const a = await new F.storage.IndexedDBAdapter(S.STORES).open();
+      local = {};
+      for (const s of S.STORES) local[s] = await a.getAll(s);
+      a.db.close();
+    } catch (_) { C.markMigrated(C.user.uid); return; }
+    const hasLocal = (local.accounts || []).length || (local.transactions || []).length;
+    if (!hasLocal) { C.markMigrated(C.user.uid); return; }
+    const v = IO.validateBackup({ app: IO.APP_ID, format: 'financial-backup', schemaVersion: S.SCHEMA_VERSION, data: local });
+    if (!v.ok) { C.markMigrated(C.user.uid); return; }
+    const n = (k) => U.plainNumber((v.data[k] || []).length);
+    const cloudEmpty = St.isEmpty();
+    const body = '<p>Este dispositivo tiene datos guardados <b>sin cuenta</b>: ' + n('accounts') + ' cuenta(s) y ' + n('transactions') + ' movimiento(s).</p>' +
+      (cloudEmpty ? '<p>Tu cuenta en la nube está vacía. ¿Quieres subirlos para tenerlos en todos tus dispositivos?</p>'
+        : '<p>Tu cuenta en la nube ya tiene datos. Puedes <b>combinar</b>: se agregan los registros de este dispositivo que no estén en la cuenta, sin borrar nada.</p>') +
+      '<p class="muted small">Elijas lo que elijas, la copia sin cuenta sigue guardada en este dispositivo.</p>';
+    const m = ui.modal({
+      title: 'Datos de este dispositivo', size: 'small', body,
+      footer: '<button class="btn" data-skip>' + (cloudEmpty ? 'Empezar vacío' : 'No combinar') + '</button><button class="btn primary" data-go>' + (cloudEmpty ? 'Subir a mi cuenta' : 'Combinar') + '</button>'
+    });
+    m.el.querySelector('[data-skip]').addEventListener('click', () => { C.markMigrated(C.user.uid); m.close(); });
+    m.el.querySelector('[data-go]').addEventListener('click', async () => {
+      try {
+        if (cloudEmpty) {
+          const data = Object.assign({}, v.data);
+          const incoming = (data.settings || []).find(s => s.id === 'main');
+          data.settings = [Object.assign({}, St.settings(), incoming || {}, { id: 'main', privacyNoticeSeen: true })];
+          await St.replaceAll(data);
+          ui.toast('Datos subidos a tu cuenta.');
+        } else {
+          const c = await St.merge(v.data);
+          const total = Object.values(c).reduce((a, b) => a + b, 0);
+          ui.toast(total ? 'Se agregaron ' + U.plainNumber(total) + ' registro(s) a tu cuenta.' : 'No había registros nuevos: todo ya estaba en tu cuenta.');
+        }
+        C.markMigrated(C.user.uid); m.close();
+      } catch (e) { ui.toast('No se pudo: ' + C.errorText(e), { type: 'error', timeout: 8000 }); }
+    });
+  }
+
+  // ============================ Tarjeta en Ajustes ============================
+  const STATUS = {
+    synced: ['check', 'Sincronizado'],
+    pending: ['clock', 'Subiendo cambios…'],
+    offline: ['alert', 'Sin conexión: trabajando con la copia de este dispositivo'],
+    'offline-pending': ['clock', 'Sin conexión: los cambios se subirán al volver internet']
+  };
+  function statusHTML() {
+    const a = C.adapter; if (!a) return '';
+    const [ico, label] = STATUS[a.status()] || STATUS.synced;
+    return ui.icon(ico, 'tiny') + ' ' + esc(label);
+  }
+  function updateStatus() { document.querySelectorAll('[data-cloud-status]').forEach(el => { el.innerHTML = statusHTML(); }); }
+
+  function card() {
+    if (!/^https?:$/.test(location.protocol)) return '';
+    const active = St.adapter && St.adapter.kind === 'firestore';
+    let body;
+    if (active) {
+      body = '<p>Entraste como <b>' + esc(C.user && (C.user.email || 'usuario de Google')) + '</b>. Tus datos se guardan en tu cuenta y se sincronizan al instante con tus otros dispositivos.</p>' +
+        '<p class="drive-status" data-cloud-status>' + statusHTML() + '</p>' +
+        '<p class="muted small">Plan gratuito de Firebase: sobra para uso personal. Sin internet sigues trabajando normal; los cambios se suben solos al reconectar.</p>' +
+        '<div class="btn-row"><button class="btn" data-cloud-out>Cerrar sesión</button></div>';
+    } else {
+      const cfg = C.config();
+      body = '<p>Crea una cuenta (correo y contraseña, o Google) para ver y registrar tus finanzas desde <b>cualquier dispositivo</b>, sincronizado al instante.</p>' +
+        '<p class="muted small">Usa tu propio proyecto gratuito de Firebase (Google). Solo tu usuario puede leer los datos. Mientras no lo actives, todo sigue solo en este dispositivo.</p>' +
+        (cfg ? '<p class="muted small">Proyecto: <code>' + esc(cfg.projectId) + '</code></p>' :
+          '<label class="field"><span class="lbl">Configuración de Firebase</span><textarea data-cloud-cfg rows="5" spellcheck="false" autocapitalize="off" placeholder="const firebaseConfig = {\n  apiKey: &quot;…&quot;,\n  authDomain: &quot;…&quot;,\n  projectId: &quot;…&quot;,\n  appId: &quot;…&quot;\n};"></textarea><span class="hint">Pega el bloque <code>firebaseConfig</code> que te da Firebase (pasos abajo).</span></label>') +
+        '<div class="btn-row"><button class="btn primary" data-cloud-on>' + ui.icon('lock') + (cfg ? 'Iniciar sesión o crear cuenta' : 'Activar cuenta en la nube') + '</button>' +
+        (cfg && !C.hasBakedConfig() ? '<button class="btn ghost" data-cloud-reset>Cambiar proyecto</button>' : '') + '</div>' +
+        '<details class="drive-help"><summary>¿Cómo creo mi proyecto gratuito de Firebase?</summary><ol class="small">' +
+        '<li>Entra a <b>console.firebase.google.com</b> → <b>Crear proyecto</b> (puedes desactivar Google Analytics). No pide tarjeta: queda en el plan gratuito <b>Spark</b>.</li>' +
+        '<li><b>Authentication → Comenzar → Método de acceso</b>: activa <b>Correo electrónico/contraseña</b> (y <b>Google</b> si quieres).</li>' +
+        '<li><b>Authentication → Configuración → Dominios autorizados</b>: agrega <code>' + esc(location.hostname) + '</code>.</li>' +
+        '<li><b>Firestore Database → Crear base de datos</b> (modo producción, ubicación cercana). En la pestaña <b>Reglas</b> pega las reglas del archivo <code>firestore.rules</code> y pulsa <b>Publicar</b>.</li>' +
+        '<li><b>Configuración del proyecto → Tus apps → Web (&lt;/&gt;)</b>: registra la app y copia el bloque <code>firebaseConfig</code>. Pégalo arriba.</li></ol></details>';
+    }
+    return vh.card('Cuenta en la nube', body, { icon: 'lock', cls: 'cloud-card' });
+  }
+  function bind(el) {
+    const on = (sel, fn) => { const b = el.querySelector(sel); if (b) b.addEventListener('click', fn); };
+    on('[data-cloud-on]', () => {
+      const ta = el.querySelector('[data-cloud-cfg]');
+      if (ta) {
+        const c = C.saveConfig(ta.value);
+        if (!c) { ui.toast('No reconozco esa configuración. Debe incluir apiKey y projectId.', { type: 'error', timeout: 6000 }); return; }
+      }
+      C.setMode('cloud'); location.reload();
+    });
+    on('[data-cloud-reset]', () => { try { const s = JSON.parse(localStorage.getItem('finanzas-cloud') || '{}'); delete s.config; localStorage.setItem('finanzas-cloud', JSON.stringify(s)); } catch (_) {} F.app.render(true); });
+    on('[data-cloud-out]', async () => {
+      const ok = await ui.confirmDialog({ title: 'Cerrar sesión', html: '<p>Tus datos siguen seguros en tu cuenta. En este dispositivo se borrará la copia de la nube hasta que vuelvas a entrar.</p>', confirmText: 'Cerrar sesión' });
+      if (!ok) return;
+      await C.signOut(); location.reload();
+    });
+  }
+
+  F.account = { showLogin, showOffline, maybeMigrate, card, bind, updateStatus };
+})(window.FIN);
 
 </script>
   <script>
@@ -6030,6 +6965,7 @@ body { overscroll-behavior-y: none; }
   let current = { name: 'inicio', params: {} };
   let renderQueued = false;
   let lastDay = null;
+  let cloudError = null;
 
   function parseHash() {
     const h = location.hash.replace(/^#\/?/, '');
@@ -6094,7 +7030,11 @@ body { overscroll-behavior-y: none; }
     const host = document.getElementById('banners');
     let h = '';
     if (St.adapter && St.adapter.kind === 'memory') h += '<div class="banner error">' + ui.icon('alert') + '<span>No se pudo abrir el almacenamiento local de este navegador (¿modo privado?). Los cambios <b>no se guardarán</b> al cerrar. Exporta un respaldo antes de salir.</span></div>';
-    if (!St.settings().privacyNoticeSeen && !St.isEmpty()) h += '<div class="banner">' + ui.icon('lock') + '<span>Tus datos se guardan solo en este dispositivo, en el navegador. No se envían a ningún servidor.</span><button class="btn small" data-dismiss-privacy>Entendido</button></div>';
+    if (cloudError) h += '<div class="banner error">' + ui.icon('alert') + '<span><b>No se pudo abrir tu cuenta en la nube:</b> ' + esc(cloudError) + ' Estás viendo los datos guardados <b>sin cuenta</b> en este dispositivo.</span><button class="btn small" onclick="location.reload()">Reintentar</button></div>';
+    if (!St.settings().privacyNoticeSeen && !St.isEmpty() && St.adapter.kind !== 'firestore') h += '<div class="banner">' + ui.icon('lock') + '<span>Tus datos se guardan solo en este dispositivo, en el navegador. No se envían a ningún servidor.</span><button class="btn small" data-dismiss-privacy>Entendido</button></div>';
+    const ds = F.drive && F.drive.connected() ? F.drive.state() : null;
+    if (ds && (ds.status === 'conflict' || ds.status === 'remote-newer')) h += '<div class="banner">' + ui.icon('alert') + '<span><b>Google Drive:</b> ' + (ds.status === 'remote-newer' ? 'hay un respaldo en tu Drive.' : 'el respaldo de Drive es distinto al de este dispositivo.') + ' Elige cómo seguir.</span><a class="btn small primary" href="#/ajustes">Ver</a></div>';
+    else if (ds && ds.dirty && (ds.status === 'needs-auth' || ds.status === 'error')) h += '<div class="banner error">' + ui.icon('alert') + '<span><b>Google Drive:</b> ' + esc(ds.detail || 'no se pudo sincronizar') + ' Tus cambios siguen guardados aquí.</span><button class="btn small primary" data-drive-retry>' + (ds.status === 'needs-auth' ? 'Reconectar' : 'Reintentar') + '</button></div>';
     const pm = F.pwa && F.pwa.mode();
     if (pm && !F.pwa.dismissed()) {
       h += '<div class="banner install">' + ui.icon('home') + '<span>' + (pm === 'prompt'
@@ -6104,6 +7044,8 @@ body { overscroll-behavior-y: none; }
         '<button class="btn small" data-pwa-dismiss>Ahora no</button></div>';
     }
     host.innerHTML = h;
+    const dr = host.querySelector('[data-drive-retry]');
+    if (dr) dr.addEventListener('click', () => F.drive.push({ interactive: true }));
     const pi = host.querySelector('[data-pwa-install]');
     if (pi) pi.addEventListener('click', () => F.pwa.install().then(updateBanners));
     const pd = host.querySelector('[data-pwa-dismiss]');
@@ -6189,12 +7131,34 @@ body { overscroll-behavior-y: none; }
   // ---------------- Arranque ----------------
   async function start() {
     buildShell();
-    let adapter = new F.storage.IndexedDBAdapter(S.STORES);
-    try { await St.init(adapter); }
-    catch (e) {
-      console.warn('IndexedDB no disponible, se usa memoria', e);
-      adapter = new F.storage.MemoryAdapter(S.STORES);
-      await St.init(adapter);
+    let adapter = null;
+    // ---- Cuenta en la nube (Firebase), si está activada ----
+    if (F.cloud && F.cloud.enabled()) {
+      try {
+        const user = await F.cloud.boot();
+        if (!user) { F.account.showLogin(); return; }
+        adapter = F.cloud.makeAdapter(S.STORES, {
+          onRemote: () => { St.init(St.adapter).catch(e => console.warn(e)); },
+          onError: (e) => { ui.toast(F.cloud.errorText(e), { type: 'error', timeout: 8000 }); },
+          onStatus: () => { if (F.account) F.account.updateStatus(); }
+        });
+        await St.init(adapter);
+        document.querySelector('.side-foot').innerHTML = ui.icon('lock', 'tiny') + 'Sincronizado con tu cuenta';
+      } catch (e) {
+        console.error(e);
+        cloudError = F.cloud.errorText(e);
+        if (F.cloud.user && e.code === 'first-sync') { F.account.showOffline(cloudError); return; }
+        adapter = null;
+      }
+    }
+    if (!adapter) {
+      adapter = new F.storage.IndexedDBAdapter(S.STORES);
+      try { await St.init(adapter); }
+      catch (e) {
+        console.warn('IndexedDB no disponible, se usa memoria', e);
+        adapter = new F.storage.MemoryAdapter(S.STORES);
+        await St.init(adapter);
+      }
     }
     applyTheme();
     try {
@@ -6203,6 +7167,12 @@ body { overscroll-behavior-y: none; }
     } catch (e) { console.warn(e); }
     if (!St.isEmpty() && adapter.kind === 'indexeddb') adapter.requestPersistence();
     St.on(scheduleRender);
+    if (F.drive) {
+      St.on((ev) => { if (!ev || ev.action !== 'init') F.drive.markDirty(); });
+      F.drive.onChange(() => { updateBanners(); if (current.name === 'ajustes') scheduleRender(); });
+      window.addEventListener('online', () => F.drive.check());
+      F.drive.check();
+    }
     // Sincronización entre pestañas: si otra pestaña cambia datos, recargar.
     try {
       const ch = new BroadcastChannel('finanzas-personales');
@@ -6215,6 +7185,7 @@ body { overscroll-behavior-y: none; }
     document.addEventListener('change', onChange);
     document.addEventListener('keydown', onKey);
     document.addEventListener('visibilitychange', async () => {
+      if (document.visibilityState === 'visible' && F.drive) F.drive.check();
       if (document.visibilityState === 'visible' && lastDay && lastDay !== U.today()) {
         await R.runAuto(St);
         F.ledger.invalidate();
@@ -6226,6 +7197,7 @@ body { overscroll-behavior-y: none; }
     if (F.pwa) F.pwa.init(updateBanners);
     updateBanners();
     navigate();
+    if (St.adapter.kind === 'firestore' && F.account) F.account.maybeMigrate();
     if (current.params.add) { const t = current.params.add; history.replaceState(null, '', location.pathname + '#/' + current.name); F.txForm.open({ type: S.TX_TYPES[t] ? t : 'expense' }); }
   }
 

@@ -10,7 +10,7 @@
     return '<section class="welcome">' +
       '<h1>Tu sistema financiero personal</h1>' +
       '<p>Registra ingresos, gastos, ahorro, inversiones y deudas. Con el tiempo verás cómo evolucionan tu flujo de caja y tu patrimonio.</p>' +
-      '<div class="privacy-note">' + ui.icon('lock') + '<div><strong>Tus datos se quedan en este dispositivo.</strong> Se guardan en el almacenamiento local del navegador (IndexedDB). No se envían a ningún servidor, no hay analítica ni publicidad. Exporta respaldos con frecuencia.</div></div>' +
+      (F.Store.adapter && F.Store.adapter.kind === 'firestore' ? '<div class="privacy-note">' + ui.icon('lock') + '<div><strong>Tus datos están en tu cuenta.</strong> Se sincronizan con todos tus dispositivos y solo tu usuario puede leerlos. Sin internet sigues trabajando: los cambios se suben solos al reconectar.</div></div>' : '<div class="privacy-note">' + ui.icon('lock') + '<div><strong>Tus datos se quedan en este dispositivo.</strong> Se guardan en el almacenamiento local del navegador (IndexedDB). No se envían a ningún servidor, no hay analítica ni publicidad. Exporta respaldos con frecuencia.</div></div>') +
       '<ol class="steps"><li><strong>Crea tus cuentas</strong> con su saldo de hoy (banco, Nequi, efectivo, tarjeta…).</li><li><strong>Registra movimientos</strong> con el botón <b>+</b>: valor, categoría, cuenta y listo.</li><li><strong>Añade</strong> metas, presupuestos, inversiones y deudas cuando quieras.</li></ol>' +
       '<div class="welcome-actions"><button class="btn primary" data-act="new-account">' + ui.icon('wallet') + 'Crear mi primera cuenta</button>' +
       '<button class="btn" data-act="load-demo">Cargar datos de ejemplo</button>' +
@@ -135,6 +135,7 @@
   function backupNudge() {
     const st = St.settings();
     if (St.isEmpty()) return '';
+    if (St.adapter && St.adapter.kind === 'firestore') return '';   // ya están en la nube
     const last = st.lastBackupAt ? U.daysBetween(st.lastBackupAt.slice(0, 10), U.today()) : null;
     if (last !== null && last < 30) return '';
     return '<div class="nudge">' + ui.icon('shield') + '<span>' + (last === null ? 'Aún no has exportado un respaldo.' : 'Tu último respaldo fue hace ' + last + ' días.') + ' Los datos viven solo en este navegador.</span><button class="btn small" data-act="export-backup">Exportar respaldo</button></div>';

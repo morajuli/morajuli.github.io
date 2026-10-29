@@ -19,6 +19,7 @@
   let current = { name: 'inicio', params: {} };
   let renderQueued = false;
   let lastDay = null;
+  let cloudError = null;
 
   function parseHash() {
     const h = location.hash.replace(/^#\/?/, '');
@@ -83,7 +84,11 @@
     const host = document.getElementById('banners');
     let h = '';
     if (St.adapter && St.adapter.kind === 'memory') h += '<div class="banner error">' + ui.icon('alert') + '<span>No se pudo abrir el almacenamiento local de este navegador (¿modo privado?). Los cambios <b>no se guardarán</b> al cerrar. Exporta un respaldo antes de salir.</span></div>';
-    if (!St.settings().privacyNoticeSeen && !St.isEmpty()) h += '<div class="banner">' + ui.icon('lock') + '<span>Tus datos se guardan solo en este dispositivo, en el navegador. No se envían a ningún servidor.</span><button class="btn small" data-dismiss-privacy>Entendido</button></div>';
+    if (cloudError) h += '<div class="banner error">' + ui.icon('alert') + '<span><b>No se pudo abrir tu cuenta en la nube:</b> ' + esc(cloudError) + ' Estás viendo los datos guardados <b>sin cuenta</b> en este dispositivo.</span><button class="btn small" onclick="location.reload()">Reintentar</button></div>';
+    if (!St.settings().privacyNoticeSeen && !St.isEmpty() && St.adapter.kind !== 'firestore') h += '<div class="banner">' + ui.icon('lock') + '<span>Tus datos se guardan solo en este dispositivo, en el navegador. No se envían a ningún servidor.</span><button class="btn small" data-dismiss-privacy>Entendido</button></div>';
+    const ds = F.drive && F.drive.connected() ? F.drive.state() : null;
+    if (ds && (ds.status === 'conflict' || ds.status === 'remote-newer')) h += '<div class="banner">' + ui.icon('alert') + '<span><b>Google Drive:</b> ' + (ds.status === 'remote-newer' ? 'hay un respaldo en tu Drive.' : 'el respaldo de Drive es distinto al de este dispositivo.') + ' Elige cómo seguir.</span><a class="btn small primary" href="#/ajustes">Ver</a></div>';
+    else if (ds && ds.dirty && (ds.status === 'needs-auth' || ds.status === 'error')) h += '<div class="banner error">' + ui.icon('alert') + '<span><b>Google Drive:</b> ' + esc(ds.detail || 'no se pudo sincronizar') + ' Tus cambios siguen guardados aquí.</span><button class="btn small primary" data-drive-retry>' + (ds.status === 'needs-auth' ? 'Reconectar' : 'Reintentar') + '</button></div>';
     const pm = F.pwa && F.pwa.mode();
     if (pm && !F.pwa.dismissed()) {
       h += '<div class="banner install">' + ui.icon('home') + '<span>' + (pm === 'prompt'
@@ -93,6 +98,8 @@
         '<button class="btn small" data-pwa-dismiss>Ahora no</button></div>';
     }
     host.innerHTML = h;
+    const dr = host.querySelector('[data-drive-retry]');
+    if (dr) dr.addEventListener('click', () => F.drive.push({ interactive: true }));
     const pi = host.querySelector('[data-pwa-install]');
     if (pi) pi.addEventListener('click', () => F.pwa.install().then(updateBanners));
     const pd = host.querySelector('[data-pwa-dismiss]');
@@ -178,12 +185,34 @@
   // ---------------- Arranque ----------------
   async function start() {
     buildShell();
-    let adapter = new F.storage.IndexedDBAdapter(S.STORES);
-    try { await St.init(adapter); }
-    catch (e) {
-      console.warn('IndexedDB no disponible, se usa memoria', e);
-      adapter = new F.storage.MemoryAdapter(S.STORES);
-      await St.init(adapter);
+    let adapter = null;
+    // ---- Cuenta en la nube (Firebase), si está activada ----
+    if (F.cloud && F.cloud.enabled()) {
+      try {
+        const user = await F.cloud.boot();
+        if (!user) { F.account.showLogin(); return; }
+        adapter = F.cloud.makeAdapter(S.STORES, {
+          onRemote: () => { St.init(St.adapter).catch(e => console.warn(e)); },
+          onError: (e) => { ui.toast(F.cloud.errorText(e), { type: 'error', timeout: 8000 }); },
+          onStatus: () => { if (F.account) F.account.updateStatus(); }
+        });
+        await St.init(adapter);
+        document.querySelector('.side-foot').innerHTML = ui.icon('lock', 'tiny') + 'Sincronizado con tu cuenta';
+      } catch (e) {
+        console.error(e);
+        cloudError = F.cloud.errorText(e);
+        if (F.cloud.user && e.code === 'first-sync') { F.account.showOffline(cloudError); return; }
+        adapter = null;
+      }
+    }
+    if (!adapter) {
+      adapter = new F.storage.IndexedDBAdapter(S.STORES);
+      try { await St.init(adapter); }
+      catch (e) {
+        console.warn('IndexedDB no disponible, se usa memoria', e);
+        adapter = new F.storage.MemoryAdapter(S.STORES);
+        await St.init(adapter);
+      }
     }
     applyTheme();
     try {
@@ -192,6 +221,12 @@
     } catch (e) { console.warn(e); }
     if (!St.isEmpty() && adapter.kind === 'indexeddb') adapter.requestPersistence();
     St.on(scheduleRender);
+    if (F.drive) {
+      St.on((ev) => { if (!ev || ev.action !== 'init') F.drive.markDirty(); });
+      F.drive.onChange(() => { updateBanners(); if (current.name === 'ajustes') scheduleRender(); });
+      window.addEventListener('online', () => F.drive.check());
+      F.drive.check();
+    }
     // Sincronización entre pestañas: si otra pestaña cambia datos, recargar.
     try {
       const ch = new BroadcastChannel('finanzas-personales');
@@ -204,6 +239,7 @@
     document.addEventListener('change', onChange);
     document.addEventListener('keydown', onKey);
     document.addEventListener('visibilitychange', async () => {
+      if (document.visibilityState === 'visible' && F.drive) F.drive.check();
       if (document.visibilityState === 'visible' && lastDay && lastDay !== U.today()) {
         await R.runAuto(St);
         F.ledger.invalidate();
@@ -215,6 +251,7 @@
     if (F.pwa) F.pwa.init(updateBanners);
     updateBanners();
     navigate();
+    if (St.adapter.kind === 'firestore' && F.account) F.account.maybeMigrate();
     if (current.params.add) { const t = current.params.add; history.replaceState(null, '', location.pathname + '#/' + current.name); F.txForm.open({ type: S.TX_TYPES[t] ? t : 'expense' }); }
   }
 

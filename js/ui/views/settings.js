@@ -43,6 +43,11 @@
     if (!file) return;
     let text;
     try { text = await ui.readText(file); } catch (e) { ui.toast(e.message, { type: 'error' }); return; }
+    showImport(text, file.name, file.size, {});
+  }
+  /** Valida y muestra el diálogo de importación (archivo local o respaldo de Drive). opts.onApplied(mode) */
+  function showImport(text, fileName, fileSize, opts) {
+    const file = { name: fileName, size: fileSize };
     const parsed = IO.parseJSONText(text);
     const v = parsed.ok ? IO.validateBackup(parsed.value) : { ok: false, fatal: [parsed.error], invalid: [] };
     const names = { accounts: 'Cuentas', categories: 'Categorías', transactions: 'Movimientos', recurring: 'Recurrentes', budgets: 'Presupuestos', goals: 'Metas', investments: 'Inversiones', debts: 'Deudas', assets: 'Otros activos', settings: 'Configuración' };
@@ -67,6 +72,7 @@
       const total = Object.values(counts).reduce((a, b) => a + b, 0);
       m.close();
       ui.toast(total ? 'Se agregaron ' + U.plainNumber(total) + ' registro(s).' : 'No había registros nuevos: todo ya existía.');
+      if (opts.onApplied) opts.onApplied('merge');
     });
     m.el.querySelector('[data-replace]').addEventListener('click', async () => {
       if (!ackOk()) return;
@@ -77,7 +83,7 @@
       const keepSettings = St.settings();
       const incomingSettings = (data.settings || []).find(s => s.id === 'main');
       data.settings = [Object.assign({}, keepSettings, incomingSettings || {}, { id: 'main', privacyNoticeSeen: true })];
-      try { await St.replaceAll(data); m.close(); ui.toast('Datos reemplazados correctamente.'); }
+      try { await St.replaceAll(data); m.close(); ui.toast('Datos reemplazados correctamente.'); if (opts.onApplied) opts.onApplied('replace'); }
       catch (e) { ui.toast('No se pudo importar: ' + e.message + '. Tus datos no cambiaron.', { type: 'error', timeout: 8000 }); }
     });
   }
@@ -149,13 +155,84 @@
     location.hash = '#/';
   }
 
+
+  // ================================ GOOGLE DRIVE ================================
+  async function driveConnect(inputEl) {
+    const D = F.drive;
+    const id = inputEl ? inputEl.value.trim() : undefined;
+    if (inputEl && !/\.apps\.googleusercontent\.com$/.test(id)) { ui.toast('El ID de cliente debe terminar en «.apps.googleusercontent.com».', { type: 'error', timeout: 6000 }); return; }
+    try { await D.connect(id); ui.toast('Google Drive conectado.'); }
+    catch (e) { ui.toast(e.message || 'No se pudo conectar con Google.', { type: 'error', timeout: 7000 }); }
+  }
+  async function driveRestore() {
+    try {
+      ui.toast('Descargando de Drive…');
+      const r = await F.drive.fetchRemote(true);
+      showImport(r.text, 'Google Drive · ' + F.drive.FILE_NAME, r.text.length, { onApplied: (mode) => F.drive.adopt(r, mode === 'replace') });
+    } catch (e) { ui.toast(e.message || 'No se pudo descargar de Drive.', { type: 'error', timeout: 7000 }); }
+  }
+  async function driveOverwrite() {
+    const ok = await ui.confirmDialog({ title: 'Reemplazar el respaldo de Drive', html: '<p>Se sobrescribirá el respaldo que hay en Drive con los datos de <b>este dispositivo</b>.</p><p>Si el de Drive tenía datos más recientes (por ejemplo, de otro celular), se perderán. Drive conserva versiones anteriores del archivo por un tiempo.</p>', confirmText: 'Reemplazar en Drive', danger: true });
+    if (ok) F.drive.push({ force: true, interactive: true });
+  }
+  async function driveDisconnect() {
+    const ok = await ui.confirmDialog({ title: 'Desconectar Google Drive', html: '<p>Dejará de sincronizarse. Tus datos en este dispositivo y el respaldo que ya está en tu Drive <b>no se borran</b>.</p>', confirmText: 'Desconectar' });
+    if (ok) { F.drive.disconnect(); ui.toast('Google Drive desconectado.'); }
+  }
+  const DRIVE_STATUS = {
+    idle: ['check', 'Al día'], pending: ['clock', 'Cambios pendientes de subir…'], syncing: ['clock', 'Sincronizando…'],
+    'needs-auth': ['alert', 'Hay que volver a iniciar sesión con Google'], offline: ['alert', 'Sin conexión: se subirá cuando vuelva internet'],
+    conflict: ['alert', 'Drive tiene un respaldo distinto al de este dispositivo'], 'remote-newer': ['download', 'Ya hay un respaldo en tu Drive'], error: ['alert', 'Error al sincronizar']
+  };
+  function driveCard() {
+    const D = F.drive;
+    if (!D) return '';
+    if (St.adapter && St.adapter.kind === 'firestore' && !D.connected()) return '';
+    const s = D.state();
+    let body;
+    if (!s.connected) {
+      body = '<p>Guarda una copia al día de tus datos en una carpeta de <b>tu propio Google Drive</b>. Si cambias de celular o borras el navegador, los recuperas desde ahí.</p>' +
+        '<p class="muted small">Usa el permiso mínimo: la app solo ve la carpeta «' + esc(D.FOLDER_NAME) + '» que ella misma crea, nunca el resto de tu Drive. Sin conectar, la app no hace ninguna conexión a internet.</p>' +
+        (D.hasConfigClientId() ? '' :
+          '<label class="field"><span class="lbl">ID de cliente de Google</span><input type="text" data-drive-id inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="123456-abc.apps.googleusercontent.com"><span class="hint">Se crea una sola vez, gratis, en Google Cloud (pasos abajo).</span></label>') +
+        '<div class="btn-row"><button class="btn primary" data-drive-connect>' + ui.icon('upload') + 'Conectar Google Drive</button></div>' +
+        '<details class="drive-help"><summary>¿Cómo obtengo el ID de cliente?</summary><ol class="small">' +
+        '<li>Entra a <b>console.cloud.google.com</b> con tu cuenta de Google y crea un proyecto (nombre libre).</li>' +
+        '<li><b>APIs y servicios → Biblioteca</b>: busca «Google Drive API» y pulsa <b>Habilitar</b>.</li>' +
+        '<li><b>Pantalla de consentimiento OAuth</b> (o «Google Auth Platform»): tipo <b>Externo</b>, nombre «Finanzas personales», tu correo. En <b>Permisos</b> agrega <code>…/auth/drive.file</code>. Luego pulsa <b>Publicar aplicación</b> (así no caduca).</li>' +
+        '<li><b>Credenciales → Crear credenciales → ID de cliente de OAuth</b>, tipo <b>Aplicación web</b>. En <b>Orígenes de JavaScript autorizados</b> agrega exactamente <code>' + esc(location.origin) + '</code> (sin «/» al final).</li>' +
+        '<li>Copia el ID que termina en <code>.apps.googleusercontent.com</code> y pégalo arriba.</li></ol></details>';
+    } else {
+      const [ico, label] = DRIVE_STATUS[s.status] || DRIVE_STATUS.idle;
+      body = '<p class="drive-status">' + ui.icon(ico, 'tiny') + ' <b>' + esc(label) + '</b>' + (s.account ? ' · ' + esc(s.account) : '') + '</p>' +
+        (s.detail && s.status !== 'idle' ? '<p class="muted small">' + esc(s.detail) + '</p>' : '') +
+        '<p class="muted small">Última copia en Drive: ' + (s.lastSyncAt ? esc(U.dateLabel(s.lastSyncAt.slice(0, 10))) + ' ' + new Date(s.lastSyncAt).toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' }) : 'todavía ninguna') + '</p>' +
+        ((s.status === 'conflict' || s.status === 'remote-newer') ? '<div class="alert warn">' + ui.icon('alert') + '<div><strong>Elige cómo seguir</strong><p>' + (s.status === 'remote-newer' ? 'Encontré un respaldo en tu Drive y aquí aún no hay datos.' : 'El respaldo de Drive cambió desde otro dispositivo y aquí también hay datos.') + ' Mientras no elijas, no se sube nada.</p>' +
+          '<div class="btn-row"><button class="btn primary" data-drive-restore>Ver y restaurar desde Drive</button>' + (s.status === 'conflict' ? '<button class="btn danger" data-drive-overwrite>Reemplazar Drive con mis datos</button>' : '') + '</div></div></div>' : '') +
+        '<div class="btn-row"><button class="btn" data-drive-sync>' + ui.icon('repeat') + 'Sincronizar ahora</button>' +
+        (s.status === 'conflict' || s.status === 'remote-newer' ? '' : '<button class="btn" data-drive-restore>Restaurar desde Drive</button>') +
+        (D.folderURL() ? '<a class="btn ghost" href="' + esc(D.folderURL()) + '" target="_blank" rel="noopener">Abrir carpeta</a>' : '') + '</div>' +
+        '<div class="btn-row"><button class="btn ghost small" data-drive-off>Desconectar</button></div>';
+    }
+    return vh.card('Google Drive', body, { icon: 'shield', cls: 'drive-card' });
+  }
+  function bindDrive(el) {
+    const on = (sel, fn) => el.querySelectorAll(sel).forEach(b => b.addEventListener('click', fn));
+    on('[data-drive-connect]', () => driveConnect(el.querySelector('[data-drive-id]')));
+    on('[data-drive-sync]', () => F.drive.push({ interactive: true }));
+    on('[data-drive-restore]', driveRestore);
+    on('[data-drive-overwrite]', driveOverwrite);
+    on('[data-drive-off]', driveDisconnect);
+  }
+
   // ================================ AJUSTES ================================
   async function ajustes(el) {
     const st = St.settings();
     const counts = S.STORES.filter(s => s !== 'settings').map(s => [s, St.all(s).length]);
     const names = { accounts: 'Cuentas', categories: 'Categorías', transactions: 'Movimientos', recurring: 'Recurrentes', budgets: 'Presupuestos', goals: 'Metas', investments: 'Inversiones', debts: 'Deudas', assets: 'Otros activos' };
     el.innerHTML = '<div class="page">' + vh.pageHead('Datos y ajustes', '') +
-      '<section class="card privacy">' + ui.icon('lock') + '<div><h2>Privacidad</h2><p>Tus datos se almacenan <b>solo en este dispositivo</b>, dentro del navegador (IndexedDB). La aplicación no tiene servidor, no envía información a ningún lugar, no usa analítica ni publicidad y funciona sin conexión.</p><p class="muted small">Si borras los datos del navegador, cambias de equipo o usas modo incógnito, los datos no estarán. Por eso es importante exportar respaldos.</p></div></section>' +
+      '<section class="card privacy">' + ui.icon('lock') + '<div><h2>Privacidad</h2>' + (St.adapter.kind === 'firestore' ? '<p>Tus datos se guardan en <b>tu cuenta</b> (tu proyecto de Firebase en Google) y solo tu usuario puede leerlos. Este dispositivo guarda una copia para usar la app sin conexión. No hay analítica ni publicidad.</p></div></section>' : '<p>Tus datos se almacenan <b>solo en este dispositivo</b>, dentro del navegador (IndexedDB). La aplicación no tiene servidor propio, no usa analítica ni publicidad y funciona sin conexión. Solo si <b>tú</b> conectas Google Drive, envía una copia a tu propia cuenta de Google.</p><p class="muted small">Si borras los datos del navegador, cambias de equipo o usas modo incógnito, los datos no estarán. Por eso es importante exportar respaldos.</p></div></section>') +
+      (F.account ? F.account.card() : '') +
       '<div class="grid-2">' +
       vh.card('Copias de seguridad', '<p>Exporta un archivo <code>financial-backup-AAAA-MM-DD.json</code> con todos tus datos y guárdalo en un lugar seguro (nube personal, USB).</p>' +
         '<p class="muted small">Último respaldo: ' + (st.lastBackupAt ? esc(U.dateLabel(st.lastBackupAt.slice(0, 10))) : 'nunca') + '</p>' +
@@ -165,13 +242,14 @@
         '<button class="btn" data-csv="tx">Movimientos</button><button class="btn" data-csv="monthly">Resumen mensual</button><button class="btn" data-csv="zip">Todo (.zip)</button></div>' +
         '<h3 class="h3">Importar movimientos desde CSV</h3><p class="muted small">Columnas mínimas: fecha, valor, cuenta. Opcionales: tipo, categoría, subcategoría, descripción, etiquetas, notas… Si no hay columna «tipo», los valores negativos se toman como gastos.</p>' +
         '<div class="btn-row"><button class="btn" data-act="import-csv">' + ui.icon('upload') + 'Importar CSV</button><button class="btn ghost" data-tpl>Descargar plantilla</button></div>') + '</div>' +
+      driveCard() +
       '<div class="grid-2">' +
       vh.card('Preferencias', '<label class="field"><span class="lbl">Moneda principal</span><select data-set="currency">' + ui.options(Object.fromEntries(Object.entries(U.CURRENCIES).map(([k, c]) => [k, k + ' · ' + c.name])), st.currency) + '</select><span class="hint">Define el formato y qué cuentas se suman a los totales. No convierte monedas: las cuentas en otra moneda se muestran aparte.</span></label>' +
         '<label class="field"><span class="lbl">Apariencia</span><select data-set="theme">' + ui.options({ auto: 'Automática (según el sistema)', light: 'Clara', dark: 'Oscura' }, st.theme || 'auto') + '</select></label>') +
       vh.card('Datos de ejemplo', '<p>Carga 12 meses de información ficticia para explorar gráficos, análisis y filtros. Se marcan como «demo» y se pueden eliminar sin afectar tus datos reales.</p><div class="btn-row">' +
         (St.hasDemo() ? '<button class="btn danger" data-act="remove-demo">Eliminar datos de ejemplo</button>' : '<button class="btn" data-act="load-demo">Cargar datos de ejemplo</button>') + '</div>') + '</div>' +
       '<div class="grid-2">' + vh.card('Almacenamiento', '<div data-storage><p class="muted">Consultando…</p></div><table class="tbl compact"><tbody>' + counts.map(([k, n]) => '<tr><th>' + names[k] + '</th><td>' + U.plainNumber(n) + '</td></tr>').join('') + '</tbody></table>') +
-      vh.card('Zona de cuidado', '<p>Elimina todos los datos de este navegador. Se descargará un respaldo antes de borrar.</p><button class="btn danger" data-wipe>Borrar todos los datos</button>', { cls: 'danger-zone' }) + '</div>' +
+      vh.card('Zona de cuidado', '<p>' + (St.adapter.kind === 'firestore' ? 'Elimina todos los datos de <b>tu cuenta</b> (en todos tus dispositivos).' : 'Elimina todos los datos de este navegador.') + ' Se descargará un respaldo antes de borrar.</p><button class="btn danger" data-wipe>Borrar todos los datos</button>', { cls: 'danger-zone' }) + '</div>' +
       '<p class="muted small center">Finanzas personales · formato de datos v' + S.SCHEMA_VERSION + ' · todo funciona localmente</p></div>';
     el.querySelectorAll('[data-set]').forEach(s => s.addEventListener('change', async () => {
       await St.saveSettings({ [s.dataset.set]: s.value });
@@ -186,6 +264,8 @@
     }));
     el.querySelector('[data-tpl]').addEventListener('click', () => ui.download('plantilla-movimientos.csv', IO.csvTemplate(), 'text/csv;charset=utf-8'));
     el.querySelector('[data-wipe]').addEventListener('click', wipeAll);
+    bindDrive(el);
+    if (F.account) F.account.bind(el);
     const info = await St.adapter.estimate();
     const host = el.querySelector('[data-storage]');
     if (host) {
@@ -214,5 +294,5 @@
     ajustes: { title: 'Datos y ajustes', render: ajustes },
     mas: { title: 'Más', render: mas }
   });
-  F.actions = Object.assign(F.actions || {}, { exportBackup, importBackup, importCSV, loadDemo, removeDemo, wipeAll });
+  F.actions = Object.assign(F.actions || {}, { exportBackup, importBackup, importBackupText: showImport, importCSV, loadDemo, removeDemo, wipeAll });
 })(typeof window !== 'undefined' ? (window.FIN = window.FIN || {}) : (globalThis.FIN = globalThis.FIN || {}));

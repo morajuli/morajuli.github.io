@@ -1,7 +1,7 @@
 /* Service worker — la app funciona sin conexión. build.py actualiza VERSION y ASSETS. */
 /* BEGIN-GENERATED */
-const VERSION = 'e1980ad6cb';
-const ASSETS = ["./", "./index.html", "./manifest.webmanifest", "./css/styles.css", "./js/app.js", "./js/core/schema.js", "./js/core/utils.js", "./js/finance/analytics.js", "./js/finance/ledger.js", "./js/finance/recurring.js", "./js/io/backup.js", "./js/io/demo.js", "./js/pwa.js", "./js/storage/adapters.js", "./js/storage/store.js", "./js/ui/charts.js", "./js/ui/dom.js", "./js/ui/forms.js", "./js/ui/tx-form.js", "./js/ui/views/analysis.js", "./js/ui/views/common.js", "./js/ui/views/dashboard.js", "./js/ui/views/money.js", "./js/ui/views/plan.js", "./js/ui/views/settings.js", "./js/ui/views/transactions.js", "./icons/apple-touch-icon.png", "./icons/favicon-32.png", "./icons/icon-192.png", "./icons/icon-512.png", "./icons/icon-maskable-512.png"];
+const VERSION = 'ae4f715b5e';
+const ASSETS = ["./", "./index.html", "./manifest.webmanifest", "./css/styles.css", "./js/app.js", "./js/config.js", "./js/core/schema.js", "./js/core/utils.js", "./js/finance/analytics.js", "./js/finance/ledger.js", "./js/finance/recurring.js", "./js/io/backup.js", "./js/io/demo.js", "./js/io/drive.js", "./js/pwa.js", "./js/storage/adapters.js", "./js/storage/cloud.js", "./js/storage/store.js", "./js/ui/charts.js", "./js/ui/dom.js", "./js/ui/forms.js", "./js/ui/tx-form.js", "./js/ui/views/account.js", "./js/ui/views/analysis.js", "./js/ui/views/common.js", "./js/ui/views/dashboard.js", "./js/ui/views/money.js", "./js/ui/views/plan.js", "./js/ui/views/settings.js", "./js/ui/views/transactions.js", "./js/vendor/firebase-sdk.js", "./icons/apple-touch-icon.png", "./icons/favicon-32.png", "./icons/icon-192.png", "./icons/icon-512.png", "./icons/icon-maskable-512.png"];
 /* END-GENERATED */
 const CACHE = 'finanzas-' + VERSION;
 

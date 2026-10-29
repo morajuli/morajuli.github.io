@@ -9,8 +9,8 @@
   <meta name="apple-mobile-web-app-title" content="Finanzas">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
-  <!-- Privacidad: connect-src 'none' impide cualquier petición de red (fetch, XHR, WebSocket, beacons). -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' data: blob:; connect-src 'none'; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <!-- Privacidad: sin cuenta en la nube ni Drive, la app no hace ninguna petición de red. Si los activas, solo puede hablar con servicios de Google/Firebase. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' data: blob:; script-src 'self' 'unsafe-inline' https://accounts.google.com/gsi/client https://apis.google.com; style-src 'self' 'unsafe-inline' https://accounts.google.com/gsi/style; connect-src 'self' https://www.googleapis.com https://accounts.google.com https://firestore.googleapis.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com; frame-src https://accounts.google.com https://apis.google.com https://*.firebaseapp.com https://*.web.app; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; form-action 'none'">
   <meta name="referrer" content="no-referrer">
   <meta name="theme-color" content="#14202b">
   <meta name="description" content="Sistema financiero personal: ingresos, gastos, ahorro, inversiones, deudas y patrimonio. Funciona 100% en tu navegador.">
@@ -47,10 +47,12 @@
   <noscript><p class="noscript">Esta aplicación necesita JavaScript activado. Todo se ejecuta localmente en tu navegador.</p></noscript>
 
   <!-- Núcleo (sin DOM) -->
+  <script src="js/config.js"></script>
   <script src="js/core/utils.js"></script>
   <script src="js/core/schema.js"></script>
   <!-- Almacenamiento -->
   <script src="js/storage/adapters.js"></script>
+  <script src="js/storage/cloud.js"></script>
   <script src="js/storage/store.js"></script>
   <!-- Lógica financiera -->
   <script src="js/finance/ledger.js"></script>
@@ -59,6 +61,7 @@
   <!-- Importación / exportación -->
   <script src="js/io/backup.js"></script>
   <script src="js/io/demo.js"></script>
+  <script src="js/io/drive.js"></script>
   <!-- Interfaz -->
   <script src="js/ui/dom.js"></script>
   <script src="js/ui/charts.js"></script>
@@ -71,6 +74,7 @@
   <script src="js/ui/views/money.js"></script>
   <script src="js/ui/views/plan.js"></script>
   <script src="js/ui/views/settings.js"></script>
+  <script src="js/ui/views/account.js"></script>
   <script src="js/pwa.js"></script>
   <script src="js/app.js"></script>
 </body>
